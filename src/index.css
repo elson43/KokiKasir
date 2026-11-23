@@ -1,0 +1,57 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-emerald-50 text-emerald-950 font-sans antialiased min-h-screen selection:bg-emerald-200 selection:text-emerald-900;
+  }
+}
+
+/* Custom scrollbar with soft jade style */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #a7f3d0;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #34d399;
+}
+
+/* Hide scrollbar for tabs / chips */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* iOS-Style Jiggle / Wiggle Animation for Multi-Select Menu Deletion */
+@keyframes wiggle {
+  0%, 100% {
+    transform: rotate(-1.2deg) scale(0.99);
+  }
+  50% {
+    transform: rotate(1.2deg) scale(1.01);
+  }
+}
+
+.animate-wiggle {
+  animation: wiggle 0.24s infinite ease-in-out;
+  transform-origin: 50% 50%;
+}
+
+.animate-wiggle:nth-child(even) {
+  animation-duration: 0.28s;
+  animation-direction: reverse;
+}
