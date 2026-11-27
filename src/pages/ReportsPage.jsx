@@ -1,125 +1,137 @@
 import React, { useState, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
-import { 
-  getLocalDate, 
-  formatDateToDDMMYYYY 
+import {
+  getLocalDate,
+  getWIBTimeString,
+  getDateNDaysAgo,
+  normalizeDateStr,
+  formatDateToDDMMYYYY,
+  formatDateShortID,
+  isTodayDate,
+  isWithinLast7Days,
+  isWithinLast30Days,
+  sortOrdersNewestFirst,
+  groupOrdersByDate
 } from '../utils/dateHelper';
 import Logo from '../components/Logo';
 import * as XLSX from 'xlsx';
-import { 
-  BarChart3, 
-  TrendingUp, 
-  CreditCard, 
-  Banknote, 
-  FileSpreadsheet, 
-  Printer, 
-  Calendar, 
-  Award, 
-  AlertCircle
+import {
+  BarChart3,
+  TrendingUp,
+  CreditCard,
+  Banknote,
+  FileSpreadsheet,
+  Printer,
+  Calendar,
+  Award,
+  AlertCircle,
+  ChevronDown,
+  Clock
 } from 'lucide-react';
 
 export default function ReportsPage() {
   const { orders, storeSettings } = useApp();
   const todayStr = getLocalDate();
+  const start7DaysStr = getDateNDaysAgo(6);
+  const start30DaysStr = getDateNDaysAgo(29);
 
-  // Filter State: 'Hari Ini' | 'Custom'
-  const [filterMode, setFilterMode] = useState('Hari Ini');
+  // Filter State: 'Hari Ini' | '7 Hari' | '30 Hari' | 'Custom' (Default: '30 Hari')
+  const [filterMode, setFilterMode] = useState('30 Hari');
 
-  // Custom Date Range State (Default: 6 hari lalu sampai hari ini = rentang 7 hari)
-  const defaultStartDate = useMemo(() => {
-    const d = new Date();
-    d.setDate(d.getDate() - 6);
-    return getLocalDate(d);
-  }, []);
-
-  const [startDate, setStartDate] = useState(defaultStartDate);
+  // Custom Date Range State (Default: 30 hari terakhir)
+  const [startDate, setStartDate] = useState(start30DaysStr);
   const [endDate, setEndDate] = useState(todayStr);
   const [rangeWarning, setRangeWarning] = useState('');
 
-  // Validasi & Update Tanggal Mulai (Max 7 Hari)
+  // Accordion state per date in Riwayat Lunas
+  const [expandedDates, setExpandedDates] = useState({});
+
+  const toggleDateAccordion = (rawDate, defaultExpanded) => {
+    setExpandedDates(prev => {
+      const current = prev[rawDate] ?? defaultExpanded;
+      return {
+        ...prev,
+        [rawDate]: !current
+      };
+    });
+  };
+
+  // Validasi & Update Tanggal Mulai (Custom Range)
   const handleStartDateChange = (val) => {
     setStartDate(val);
     setRangeWarning('');
 
-    if (val && endDate) {
-      const s = new Date(val);
-      const e = new Date(endDate);
-      const diffDays = Math.floor((e - s) / (1000 * 60 * 60 * 24));
-
-      if (diffDays < 0) {
-        setEndDate(val);
-      } else if (diffDays > 6) {
-        // Otomatis batasi endDate ke startDate + 6 hari (maksimal 7 hari)
-        const maxEnd = new Date(s);
-        maxEnd.setDate(maxEnd.getDate() + 6);
-        const maxEndStr = getLocalDate(maxEnd);
-        setEndDate(maxEndStr);
-        setRangeWarning('Rentang tanggal dibatasi maksimal 7 hari.');
-      }
+    if (val && endDate && val > endDate) {
+      setEndDate(val);
     }
   };
 
-  // Validasi & Update Tanggal Akhir (Max 7 Hari)
+  // Validasi & Update Tanggal Akhir (Custom Range)
   const handleEndDateChange = (val) => {
     setRangeWarning('');
 
-    if (startDate && val) {
-      const s = new Date(startDate);
-      const e = new Date(val);
-      const diffDays = Math.floor((e - s) / (1000 * 60 * 60 * 24));
-
-      if (diffDays < 0) {
-        setRangeWarning('Tanggal akhir tidak boleh lebih awal dari tanggal mulai.');
-        setEndDate(startDate);
-        return;
-      }
-
-      if (diffDays > 6) {
-        // Otomatis batasi ke startDate + 6 hari
-        const maxEnd = new Date(s);
-        maxEnd.setDate(maxEnd.getDate() + 6);
-        const maxEndStr = getLocalDate(maxEnd);
-        setEndDate(maxEndStr);
-        setRangeWarning('Rentang tanggal disesuaikan ke maksimal 7 hari.');
-        return;
-      }
+    if (startDate && val && val < startDate) {
+      setRangeWarning('Tanggal akhir tidak boleh lebih awal dari tanggal mulai.');
+      setEndDate(startDate);
+      return;
     }
 
     setEndDate(val);
   };
 
   // Extract PAID orders only
-  const allPaidOrders = orders.filter(o => o.status === 'PAID');
+  const allPaidOrders = useMemo(
+    () => orders.filter(o => o.status === 'PAID'),
+    [orders]
+  );
 
-  // Filter orders based on active filterMode
+  // Filter & sort PAID orders based on active filterMode (newest to oldest)
   const filteredPaidOrders = useMemo(() => {
-    return allPaidOrders.filter(o => {
-      const orderDate = o.date || todayStr;
+    const filtered = allPaidOrders.filter(o => {
+      const orderDate = normalizeDateStr(o.date || todayStr);
       if (filterMode === 'Hari Ini') {
         return orderDate === todayStr;
       }
+      if (filterMode === '7 Hari') {
+        return isWithinLast7Days(orderDate);
+      }
+      if (filterMode === '30 Hari') {
+        return isWithinLast30Days(orderDate);
+      }
       if (filterMode === 'Custom') {
-        if (!startDate || !endDate) return true;
-        return orderDate >= startDate && orderDate <= endDate;
+        if (startDate && orderDate < startDate) return false;
+        if (endDate && orderDate > endDate) return false;
+        return true;
       }
       return true;
-    }).sort((a, b) => {
-      // Sort newest first
-      const dateA = a.date || todayStr;
-      const dateB = b.date || todayStr;
-      if (dateA !== dateB) return dateB > dateA ? 1 : -1;
-      return (b.paidAt || b.createdAt || '') > (a.paidAt || a.createdAt || '') ? 1 : -1;
     });
+
+    return sortOrdersNewestFirst(filtered);
   }, [allPaidOrders, filterMode, startDate, endDate, todayStr]);
 
-  // Compute 3 Key Indicators: TOTAL OMSET, TOTAL QRIS, TOTAL TUNAI
+  // Group filtered PAID orders by date ("26 Nov 2026", "25 Nov 2026", ...)
+  const paidDateGroups = useMemo(
+    () => groupOrdersByDate(filteredPaidOrders),
+    [filteredPaidOrders]
+  );
+
+  const areAllExpanded = paidDateGroups.length > 0 && paidDateGroups.every((g, idx) => expandedDates[g.rawDate] ?? (idx === 0));
+
+  const handleToggleAllDates = () => {
+    const nextState = !areAllExpanded;
+    const updated = {};
+    paidDateGroups.forEach(g => {
+      updated[g.rawDate] = nextState;
+    });
+    setExpandedDates(updated);
+  };
+
+  // Compute 3 Key Indicators & Counts: TOTAL OMSET, TOTAL QRIS, TOTAL TUNAI
   const totalOmset = filteredPaidOrders.reduce((acc, curr) => acc + (curr.total || 0), 0);
-  const totalQRIS = filteredPaidOrders
-    .filter(o => o.paymentMethod === 'QRIS')
-    .reduce((acc, curr) => acc + (curr.total || 0), 0);
-  const totalTunai = filteredPaidOrders
-    .filter(o => o.paymentMethod === 'TUNAI' || !o.paymentMethod)
-    .reduce((acc, curr) => acc + (curr.total || 0), 0);
+  const qrisOrders = filteredPaidOrders.filter(o => o.paymentMethod === 'QRIS');
+  const tunaiOrders = filteredPaidOrders.filter(o => o.paymentMethod === 'TUNAI' || !o.paymentMethod);
+  const totalQRIS = qrisOrders.reduce((acc, curr) => acc + (curr.total || 0), 0);
+  const totalTunai = tunaiOrders.reduce((acc, curr) => acc + (curr.total || 0), 0);
 
   // Compute Bestseller Item Sold list
   const itemCounts = {};
@@ -135,7 +147,7 @@ export default function ReportsPage() {
 
   const bestsellerList = Object.values(itemCounts).sort((a, b) => b.quantity - a.quantity);
 
-  // Export Laporan ke Excel Profesional (.xlsx)
+  // Export Laporan ke Excel Profesional (.xlsx) sesuai filter aktif
   const handleExportExcel = () => {
     if (filteredPaidOrders.length === 0) {
       alert('Belum ada transaksi berstatus PAID pada filter ini untuk diekspor!');
@@ -172,7 +184,7 @@ export default function ReportsPage() {
       'Nama Pelanggan': '',
       'Tipe Pesanan': '',
       'Metode Bayar': 'TOTAL OMSET',
-      'Detail Menu': `${filteredPaidOrders.length} Transaksi`,
+      'Detail Menu': `${filteredPaidOrders.length} Transaksi (Tunai: Rp ${totalTunai.toLocaleString('id-ID')} | QRIS: Rp ${totalQRIS.toLocaleString('id-ID')})`,
       'Grand Total (Rp)': totalOmset
     });
 
@@ -214,7 +226,15 @@ export default function ReportsPage() {
     }
 
     const safeStorePrefix = storeSettings?.name ? storeSettings.name.replace(/[^a-zA-Z0-9]/g, '_') : 'KokiKasir';
-    const filenameLabel = filterMode === 'Hari Ini' ? `HariIni_${todayStr}` : `Custom_${startDate}_sd_${endDate}`;
+    let filenameLabel = `Custom_${startDate}_sd_${endDate}`;
+    if (filterMode === 'Hari Ini') {
+      filenameLabel = `HariIni_${todayStr}`;
+    } else if (filterMode === '7 Hari') {
+      filenameLabel = `7Hari_${start7DaysStr}_sd_${todayStr}`;
+    } else if (filterMode === '30 Hari') {
+      filenameLabel = `30Hari_${start30DaysStr}_sd_${todayStr}`;
+    }
+
     XLSX.writeFile(workbook, `${safeStorePrefix}_Laporan_${filenameLabel}.xlsx`);
   };
 
@@ -223,9 +243,18 @@ export default function ReportsPage() {
     window.print();
   };
 
-  const activePeriodLabel = filterMode === 'Hari Ini'
-    ? `Hari Ini (${formatDateToDDMMYYYY(todayStr)})`
-    : `${formatDateToDDMMYYYY(startDate)} s/d ${formatDateToDDMMYYYY(endDate)}`;
+  const activePeriodLabel = useMemo(() => {
+    if (filterMode === 'Hari Ini') {
+      return `Hari Ini (${formatDateShortID(todayStr)})`;
+    }
+    if (filterMode === '7 Hari') {
+      return `7 Hari Terakhir (${formatDateShortID(start7DaysStr)} - ${formatDateShortID(todayStr)})`;
+    }
+    if (filterMode === '30 Hari') {
+      return `30 Hari Terakhir (${formatDateShortID(start30DaysStr)} - ${formatDateShortID(todayStr)})`;
+    }
+    return `${formatDateShortID(startDate)} s/d ${formatDateShortID(endDate)}`;
+  }, [filterMode, todayStr, start7DaysStr, start30DaysStr, startDate, endDate]);
 
   return (
     <div className="space-y-6 pb-20 lg:pb-10">
@@ -265,30 +294,33 @@ export default function ReportsPage() {
           </div>
           <div className="text-right text-xs text-stone-600 space-y-0.5">
             <div><strong>Periode:</strong> {activePeriodLabel}</div>
-            <div><strong>Dicetak:</strong> {formatDateToDDMMYYYY(todayStr)} {new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })} WIB</div>
+            <div><strong>Dicetak:</strong> {formatDateShortID(todayStr)} {getWIBTimeString(new Date())} WIB</div>
             <div><strong>Total Transaksi:</strong> {filteredPaidOrders.length} Pesanan Lunas</div>
           </div>
         </div>
 
-        {/* Ringkasan Omset Cetak (Kotak Bersih Minimalis) */}
+        {/* Ringkasan Omset Cetak */}
         <div className="grid grid-cols-3 gap-4 border border-stone-300 rounded-xl p-4 bg-stone-50">
           <div>
             <div className="text-[11px] font-bold text-stone-500 uppercase">Total Omset Penjualan</div>
             <div className="text-xl font-black text-stone-900">
               Rp {totalOmset.toLocaleString('id-ID')}
             </div>
+            <div className="text-[10px] text-stone-500">{filteredPaidOrders.length} Transaksi</div>
           </div>
           <div>
             <div className="text-[11px] font-bold text-stone-500 uppercase">Total Pembayaran QRIS</div>
             <div className="text-xl font-black text-stone-900">
               Rp {totalQRIS.toLocaleString('id-ID')}
             </div>
+            <div className="text-[10px] text-stone-500">{qrisOrders.length} Transaksi</div>
           </div>
           <div>
             <div className="text-[11px] font-bold text-stone-500 uppercase">Total Pembayaran Tunai</div>
             <div className="text-xl font-black text-stone-900">
               Rp {totalTunai.toLocaleString('id-ID')}
             </div>
+            <div className="text-[10px] text-stone-500">{tunaiOrders.length} Transaksi</div>
           </div>
         </div>
 
@@ -314,7 +346,7 @@ export default function ReportsPage() {
                 <tr key={o.id} className="border-b border-stone-200">
                   <td className="p-2 border-r border-stone-300 text-center">{idx + 1}</td>
                   <td className="p-2 border-r border-stone-300">
-                    {formatDateToDDMMYYYY(o.date || todayStr)}<br/>
+                    {formatDateShortID(o.date || todayStr)}<br/>
                     <span className="text-[10px] text-stone-500">{o.paidAt || o.createdAt} WIB</span>
                   </td>
                   <td className="p-2 border-r border-stone-300 font-bold">{o.customerName}</td>
@@ -387,7 +419,7 @@ export default function ReportsPage() {
           AREA INTERAKTIF WEB (DISEMBUNYIKAN SAAT CETAK print:hidden)
          ========================================================================= */}
       <div className="space-y-6 print:hidden">
-        {/* Warning jika rentang > 7 hari */}
+        {/* Warning jika input rentang Custom tidak valid */}
         {rangeWarning && (
           <div className="p-3.5 rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 text-xs font-semibold flex items-center gap-2 animate-fade-in shadow-xs">
             <AlertCircle className="w-4 h-4 text-amber-600 flex-shrink-0" />
@@ -395,36 +427,30 @@ export default function ReportsPage() {
           </div>
         )}
 
-        {/* Date Filter & Action Header (Hari Ini / Custom + Export Excel + Cetak) */}
+        {/* Date Filter & Action Header (Hari Ini / 7 Hari / 30 Hari / Custom + Export Excel + Cetak) */}
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-white p-5 rounded-3xl border border-emerald-100 shadow-sm shadow-emerald-100/50">
-          {/* Filter Chips: Hanya 'Hari Ini' & 'Custom' */}
-          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+          {/* Filter Chips */}
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3 flex-wrap">
             <div className="flex items-center gap-2">
               <Calendar className="w-5 h-5 text-emerald-600 flex-shrink-0" />
-              <div className="flex bg-emerald-50 p-1 rounded-2xl border border-emerald-100">
-                <button
-                  type="button"
-                  onClick={() => setFilterMode('Hari Ini')}
-                  className={`px-4 py-1.5 rounded-xl font-bold text-xs transition-all ${
-                    filterMode === 'Hari Ini'
-                      ? 'bg-emerald-500 text-white shadow-xs'
-                      : 'text-emerald-900/70 hover:bg-white/60'
-                  }`}
-                >
-                  Hari Ini
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setFilterMode('Custom')}
-                  className={`px-4 py-1.5 rounded-xl font-bold text-xs transition-all ${
-                    filterMode === 'Custom'
-                      ? 'bg-emerald-500 text-white shadow-xs'
-                      : 'text-emerald-900/70 hover:bg-white/60'
-                  }`}
-                >
-                  Custom Range (Maks 7 Hari)
-                </button>
+              <div className="flex flex-wrap bg-emerald-50 p-1 rounded-2xl border border-emerald-100 gap-1">
+                {['Hari Ini', '7 Hari', '30 Hari', 'Custom'].map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => {
+                      setFilterMode(mode);
+                      setRangeWarning('');
+                    }}
+                    className={`px-3.5 py-1.5 rounded-xl font-bold text-xs transition-all ${
+                      filterMode === mode
+                        ? 'bg-emerald-500 text-white shadow-xs'
+                        : 'text-emerald-900/70 hover:bg-white/60'
+                    }`}
+                  >
+                    {mode === '30 Hari' ? '30 Hari' : mode}
+                  </button>
+                ))}
               </div>
             </div>
 
@@ -502,7 +528,7 @@ export default function ReportsPage() {
                 Rp {totalQRIS.toLocaleString('id-ID')}
               </div>
               <span className="text-[11px] text-teal-600 font-medium">
-                Digital Payment
+                {qrisOrders.length} Transaksi • Digital Payment
               </span>
             </div>
             <div className="w-12 h-12 rounded-2xl bg-teal-100 text-teal-700 flex items-center justify-center shadow-xs">
@@ -520,7 +546,7 @@ export default function ReportsPage() {
                 Rp {totalTunai.toLocaleString('id-ID')}
               </div>
               <span className="text-[11px] text-emerald-600 font-medium">
-                Uang Kas Laci
+                {tunaiOrders.length} Transaksi • Uang Kas Laci
               </span>
             </div>
             <div className="w-12 h-12 rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center shadow-xs">
@@ -529,71 +555,138 @@ export default function ReportsPage() {
           </div>
         </div>
 
-        {/* Grid: Tabel Riwayat Transaksi & Laporan Bestseller */}
+        {/* Grid: Riwayat Lunas (Grouped by Date) & Laporan Bestseller */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          {/* Tabel Riwayat Transaksi */}
+          {/* Riwayat Lunas (Grouped by Date, Accordion) */}
           <div className="lg:col-span-7 bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm shadow-emerald-100/50">
-            <div className="flex items-center justify-between mb-3">
-              <h4 className="font-extrabold text-emerald-950 text-base flex items-center gap-2">
-                <BarChart3 className="w-5 h-5 text-emerald-600" />
-                <span>Tabel Riwayat Transaksi (PAID)</span>
-              </h4>
-              <span className="text-xs text-stone-500 font-medium">
-                Periode: <strong>{activePeriodLabel}</strong>
-              </span>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
+              <div>
+                <h4 className="font-extrabold text-emerald-950 text-base flex items-center gap-2">
+                  <BarChart3 className="w-5 h-5 text-emerald-600" />
+                  <span>Riwayat Lunas (PAID)</span>
+                </h4>
+                <span className="text-[11px] text-stone-500 font-medium">
+                  Periode: <strong>{activePeriodLabel}</strong>
+                </span>
+              </div>
+
+              {paidDateGroups.length > 1 && (
+                <button
+                  type="button"
+                  onClick={handleToggleAllDates}
+                  className="self-start sm:self-auto px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold text-[11px] border border-emerald-200/70 transition-colors"
+                >
+                  {areAllExpanded ? 'Tutup Semua Tanggal' : 'Buka Semua Tanggal'}
+                </button>
+              )}
             </div>
 
-            {filteredPaidOrders.length === 0 ? (
-              <div className="text-center py-10 text-xs text-stone-500">
-                Belum ada riwayat transaksi pada rentang waktu ini.
+            {paidDateGroups.length === 0 ? (
+              <div className="text-center py-12 text-xs text-stone-500 border border-dashed border-emerald-100 rounded-2xl">
+                Belum ada riwayat transaksi lunas pada rentang waktu ini.
               </div>
             ) : (
-              /* Scrollable Container dengan kelas Tailwind persis sesuai spesifikasi */
-              <div className="max-h-96 overflow-y-auto overflow-x-auto rounded-xl border border-emerald-100">
-                <table className="w-full text-left text-xs min-w-[520px]">
-                  <thead className="bg-emerald-50/80 sticky top-0 z-10">
-                    <tr className="border-b border-emerald-100 text-emerald-900 font-bold">
-                      <th className="py-2.5 px-3">Tanggal</th>
-                      <th className="py-2.5 px-3">Pelanggan</th>
-                      <th className="py-2.5 px-3">Tipe</th>
-                      <th className="py-2.5 px-3">Waktu</th>
-                      <th className="py-2.5 px-3">Metode</th>
-                      <th className="py-2.5 px-3 text-right">Total</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-emerald-50">
-                    {filteredPaidOrders.map(order => (
-                      <tr key={order.id} className="hover:bg-emerald-50/40">
-                        <td className="py-3 px-3 text-stone-600 font-medium">
-                          {formatDateToDDMMYYYY(order.date || todayStr)}
-                        </td>
-                        <td className="py-3 px-3 font-bold text-emerald-950">{order.customerName}</td>
-                        <td className="py-3 px-3 text-stone-600">
-                          <span className={`px-2 py-0.5 rounded-md font-semibold text-[10px] ${
-                            order.orderType === 'Pesan Dulu' 
-                              ? 'bg-teal-100 text-teal-800'
-                              : order.orderType === 'Bungkus'
-                              ? 'bg-amber-100 text-amber-800'
-                              : 'bg-emerald-100 text-emerald-800'
+              <div className="max-h-[34rem] overflow-y-auto pr-1 space-y-3">
+                {paidDateGroups.map((group, idx) => {
+                  const isExpanded = expandedDates[group.rawDate] ?? (idx === 0);
+                  const groupRevenue = group.orders.reduce((sum, o) => sum + (o.total || 0), 0);
+
+                  return (
+                    <div
+                      key={group.rawDate}
+                      className="rounded-2xl border border-emerald-100/90 bg-emerald-50/20 overflow-hidden transition-all"
+                    >
+                      {/* Date Group Header */}
+                      <div
+                        onClick={() => toggleDateAccordion(group.rawDate, idx === 0)}
+                        className="flex items-center justify-between p-3.5 bg-white hover:bg-emerald-50/50 cursor-pointer select-none transition-colors"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div className={`w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0 transition-colors ${
+                            isExpanded ? 'bg-emerald-500 text-white' : 'bg-emerald-100 text-emerald-700'
                           }`}>
-                            {order.orderType}
-                          </span>
-                        </td>
-                        <td className="py-3 px-3 text-stone-500">{order.paidAt || order.createdAt}</td>
-                        <td className="py-3 px-3">
-                          <span className={`px-2 py-0.5 rounded-md font-semibold text-[10px] ${
-                            order.paymentMethod === 'QRIS' ? 'bg-teal-100 text-teal-800' : 'bg-emerald-100 text-emerald-800'
-                          }`}>
-                            {order.paymentMethod || 'TUNAI'}
-                          </span>
-                        </td>
-                        <td className="py-3 px-3 font-extrabold text-emerald-700 text-right">
-                          Rp {order.total.toLocaleString('id-ID')}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                            <Calendar className="w-4 h-4" />
+                          </div>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="font-extrabold text-sm text-emerald-950">
+                                {group.formattedDate}
+                              </span>
+                              {isTodayDate(group.rawDate) && (
+                                <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 uppercase tracking-wider">
+                                  Hari Ini
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[11px] text-stone-500 font-medium">
+                              {group.orders.length} Transaksi • <strong className="text-emerald-700">Rp {groupRevenue.toLocaleString('id-ID')}</strong>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className={`w-7 h-7 rounded-lg flex items-center justify-center transition-transform duration-200 ${
+                          isExpanded ? 'bg-emerald-100 text-emerald-800 rotate-180' : 'bg-stone-100 text-stone-600'
+                        }`}>
+                          <ChevronDown className="w-4 h-4" />
+                        </div>
+                      </div>
+
+                      {/* Expanded Transactions List for Date */}
+                      {isExpanded && (
+                        <div className="p-3 pt-2 border-t border-emerald-100/80 space-y-2 max-h-80 overflow-y-auto">
+                          {group.orders.map(order => (
+                            <div
+                              key={order.id}
+                              className="p-3 rounded-xl bg-white border border-emerald-100/70 hover:border-emerald-200 flex items-center justify-between gap-3 transition-colors"
+                            >
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span className="font-bold text-xs sm:text-sm text-emerald-950 truncate">
+                                    {order.customerName}
+                                  </span>
+                                  <span className={`px-2 py-0.5 rounded-md font-semibold text-[10px] ${
+                                    order.orderType === 'Pesan Dulu'
+                                      ? 'bg-teal-100 text-teal-800'
+                                      : order.orderType === 'Bungkus'
+                                      ? 'bg-amber-100 text-amber-800'
+                                      : 'bg-emerald-100 text-emerald-800'
+                                  }`}>
+                                    {order.orderType}
+                                  </span>
+                                  <span className={`px-2 py-0.5 rounded-md font-semibold text-[10px] ${
+                                    order.paymentMethod === 'QRIS'
+                                      ? 'bg-teal-100 text-teal-800'
+                                      : 'bg-emerald-100 text-emerald-800'
+                                  }`}>
+                                    {order.paymentMethod || 'TUNAI'}
+                                  </span>
+                                </div>
+
+                                <div className="flex items-center gap-1.5 text-[11px] text-stone-500 mt-0.5">
+                                  <Clock className="w-3 h-3 flex-shrink-0" />
+                                  <span>{order.paidAt || order.createdAt} WIB</span>
+                                  <span>•</span>
+                                  <span className="truncate">
+                                    {order.items?.map(it => `${it.quantity}x ${it.name}`).join(', ')}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="text-right flex-shrink-0">
+                                <div className="font-extrabold text-xs sm:text-sm text-emerald-700">
+                                  Rp {order.total.toLocaleString('id-ID')}
+                                </div>
+                                <div className="text-[10px] text-stone-400 font-medium">
+                                  {order.id}
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -605,7 +698,7 @@ export default function ReportsPage() {
               <span>Laporan Bestseller (Item Terjual)</span>
             </h4>
             <p className="text-[11px] text-stone-500 mb-4">
-              Acuan belanja bahan baku koki berdasarkan filter.
+              Acuan belanja bahan baku koki berdasarkan filter ({filterMode}).
             </p>
 
             {bestsellerList.length === 0 ? (
@@ -613,7 +706,7 @@ export default function ReportsPage() {
                 Belum ada item terjual pada rentang waktu ini.
               </div>
             ) : (
-              <div className="space-y-3 max-h-96 overflow-y-auto pr-1">
+              <div className="space-y-3 max-h-[30rem] overflow-y-auto pr-1">
                 {bestsellerList.map((item, index) => (
                   <div
                     key={index}

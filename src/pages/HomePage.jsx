@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
-import { getLocalDate } from '../utils/dateHelper';
+import { getLocalDate, getWIBTimeString } from '../utils/dateHelper';
 import { 
   User, 
   Utensils, 
@@ -82,7 +82,7 @@ export default function HomePage() {
     setErrorMsg('');
 
     const now = new Date();
-    const timeString = now.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+    const timeString = getWIBTimeString(now);
     const dateString = getLocalDate(now);
 
     // Format items detail for the order

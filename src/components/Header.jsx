@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import Logo from './Logo';
-import { Clock, Wifi, UtensilsCrossed } from 'lucide-react';
+import { Clock, Wifi, WifiOff, Loader2 } from 'lucide-react';
+import { useNetworkStatus } from '../hooks/useNetworkStatus';
 
 export default function Header() {
   const { activeNav, unpaidCount } = useApp();
+  const { isOnline, syncState } = useNetworkStatus();
   const [currentTime, setCurrentTime] = useState('');
 
   useEffect(() => {
@@ -68,11 +70,23 @@ export default function Header() {
           </div>
         )}
 
-        {/* Offline Ready Pill */}
-        <div className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-emerald-100/50 text-emerald-800 text-xs font-bold">
-          <Wifi className="w-3.5 h-3.5 text-emerald-600" />
-          <span className="hidden sm:inline">Offline OK</span>
-        </div>
+        {/* Network Status Pill */}
+        {!isOnline ? (
+          <div className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-stone-100 text-stone-500 text-xs font-bold">
+            <WifiOff className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Offline</span>
+          </div>
+        ) : syncState === 'syncing' ? (
+          <div className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-teal-50 text-teal-700 text-xs font-bold border border-teal-200/50">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            <span className="hidden sm:inline">Syncing...</span>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-emerald-100/50 text-emerald-800 text-xs font-bold">
+            <Wifi className="w-3.5 h-3.5 text-emerald-600" />
+            <span className="hidden sm:inline">Online</span>
+          </div>
+        )}
       </div>
     </header>
   );

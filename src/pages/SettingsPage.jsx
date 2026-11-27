@@ -1,6 +1,8 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { compressImageToBase64 } from '../utils/imageHelper';
+import { getLocalDate, formatDateShortID } from '../utils/dateHelper';
+import { readErrorLogs, downloadErrorLogsJson, clearErrorLogs } from '../utils/errorLogger';
 import Logo from '../components/Logo';
 import { 
   Settings, 
@@ -11,6 +13,7 @@ import {
   Square, 
   Store, 
   Upload, 
+  Download,
   Camera, 
   Phone, 
   Clock, 
@@ -19,11 +22,36 @@ import {
   CheckCircle2, 
   ShieldAlert, 
   HardDrive,
-  Info
+  Info,
+  Database,
+  AlertTriangle,
+  Bug
 } from 'lucide-react';
 
+/**
+ * Validasi struktur file JSON backup KokiKasir
+ */
+function isValidKokiKasirBackup(parsed) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+  if (parsed.app !== 'KokiKasir') return false;
+  if (parsed.version !== 1) return false;
+  if (!parsed.data || typeof parsed.data !== 'object' || Array.isArray(parsed.data)) return false;
+  if (!Array.isArray(parsed.data.menuItems)) return false;
+  if (!Array.isArray(parsed.data.orders)) return false;
+  if (
+    parsed.data.storeSettings !== undefined &&
+    (!parsed.data.storeSettings || typeof parsed.data.storeSettings !== 'object' || Array.isArray(parsed.data.storeSettings))
+  ) {
+    return false;
+  }
+  if (parsed.data.qrisImage !== undefined && typeof parsed.data.qrisImage !== 'string') {
+    return false;
+  }
+  return true;
+}
+
 export default function SettingsPage() {
-  const { menuItems, orders, qrisImage, storeSettings, setStoreSettings } = useApp();
+  const { menuItems, orders, qrisImage, storeSettings, setStoreSettings, restoreBackup } = useApp();
 
   // Local state for Store Customization form
   const [storeForm, setStoreForm] = useState({
@@ -36,10 +64,33 @@ export default function SettingsPage() {
 
   const [isProcessingLogo, setIsProcessingLogo] = useState(false);
   const [saveSuccessMsg, setSaveSuccessMsg] = useState('');
+  const [backupErrorMsg, setBackupErrorMsg] = useState('');
 
-  // Refs for Logo Upload (Camera & Gallery)
+  // Refs for Logo Upload (Camera & Gallery) & Backup Restore File Input
   const logoCameraRef = useRef(null);
   const logoGalleryRef = useRef(null);
+  const restoreFileInputRef = useRef(null);
+
+  // Restore Backup Confirmation Modal State
+  const [showRestoreConfirmModal, setShowRestoreConfirmModal] = useState(false);
+  const [pendingBackup, setPendingBackup] = useState(null);
+
+  // Error Log Stats
+  const [errorLogStats, setErrorLogStats] = useState({ total: 0, unreported: 0, lastTimestamp: null });
+
+  useEffect(() => {
+    const logs = readErrorLogs();
+    const unreported = logs.filter(l => !l.reported).length;
+    const lastTimestamp = logs.length > 0 ? logs[logs.length - 1].timestamp : null;
+    setErrorLogStats({ total: logs.length, unreported, lastTimestamp });
+  }, []);
+
+  const showSuccessToast = (msg) => {
+    setSaveSuccessMsg(msg);
+    setTimeout(() => {
+      setSaveSuccessMsg('');
+    }, 3500);
+  };
 
   // Granular Reset Modal State
   const [showResetModal, setShowResetModal] = useState(false);
@@ -93,10 +144,102 @@ export default function SettingsPage() {
   const handleSaveStoreSettings = (e) => {
     e.preventDefault();
     setStoreSettings(storeForm);
-    setSaveSuccessMsg('Pengaturan toko & personalisasi nota berhasil disimpan!');
-    setTimeout(() => {
-      setSaveSuccessMsg('');
-    }, 3500);
+    showSuccessToast('Pengaturan toko & personalisasi nota berhasil disimpan!');
+  };
+
+  // Helper aman membaca JSON dari localStorage
+  const readStoredJson = (key, fallback) => {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : fallback;
+    } catch {
+      return fallback;
+    }
+  };
+
+  // Export Backup (.json) dari seluruh data lokal
+  const handleBackupDownload = () => {
+    setBackupErrorMsg('');
+
+    try {
+      const storedSettings = readStoredJson('kokikasir_store_settings', storeSettings);
+      const storedQris = localStorage.getItem('kokikasir_qris_image') ?? qrisImage ?? '';
+      const storedMenu = readStoredJson('kokikasir_menu', menuItems);
+      const storedOrders = readStoredJson('kokikasir_orders', orders);
+
+      const backupPayload = {
+        app: 'KokiKasir',
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        data: {
+          storeSettings: storedSettings,
+          qrisImage: storedQris,
+          menuItems: storedMenu,
+          orders: storedOrders
+        }
+      };
+
+      const blob = new Blob([JSON.stringify(backupPayload, null, 2)], {
+        type: 'application/json'
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `kokikasir-backup-${getLocalDate()}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+
+      showSuccessToast('File backup JSON berhasil diunduh!');
+    } catch (err) {
+      setBackupErrorMsg('Gagal membuat file backup: ' + err.message);
+    }
+  };
+
+  // Pilih & Validasi File Backup (.json) sebelum konfirmasi restore
+  const handleRestoreFileSelect = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    setBackupErrorMsg('');
+
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+
+      if (!isValidKokiKasirBackup(parsed)) {
+        setBackupErrorMsg('File tidak valid! Pastikan Anda memilih file backup resmi KokiKasir (.json).');
+        return;
+      }
+
+      setPendingBackup({
+        fileName: file.name,
+        payload: parsed
+      });
+      setShowRestoreConfirmModal(true);
+    } catch {
+      setBackupErrorMsg('Gagal membaca file JSON. Pastikan file backup tidak rusak dan berformat .json yang valid.');
+    }
+  };
+
+  // Eksekusi Restore setelah konfirmasi user
+  const handleConfirmRestore = () => {
+    if (!pendingBackup?.payload?.data) return;
+
+    try {
+      const restored = restoreBackup(pendingBackup.payload.data);
+      setStoreForm(restored.storeSettings);
+      setShowRestoreConfirmModal(false);
+      setPendingBackup(null);
+      setBackupErrorMsg('');
+      showSuccessToast('Data berhasil dipulihkan! Semua menu, pengaturan, dan laporan telah diperbarui.');
+    } catch (err) {
+      setShowRestoreConfirmModal(false);
+      setPendingBackup(null);
+      setBackupErrorMsg('Gagal memulihkan data (penyimpanan lokal penuh atau rusak): ' + err.message);
+    }
   };
 
   // Open Reset Modal
@@ -333,7 +476,137 @@ export default function SettingsPage() {
         </form>
       </div>
 
-      {/* SEKSI 2: PENYEDERHANAAN UI RESET DATA APLIKASI (SATU TOMBOL UTAMA) */}
+      {/* SEKSI 2: BACKUP & RESTORE DATA OFFLINE (.JSON) */}
+      <div className="bg-white rounded-3xl p-5 sm:p-6 border border-emerald-100 shadow-sm shadow-emerald-100/50 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-emerald-100">
+          <div className="flex items-center gap-2.5">
+            <div className="w-10 h-10 rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center flex-shrink-0">
+              <Database className="w-5 h-5" />
+            </div>
+            <div>
+              <h4 className="font-extrabold text-base text-emerald-950">
+                Backup & Restore Data
+              </h4>
+              <p className="text-xs text-stone-500">
+                Simpan cadangan seluruh data aplikasi ke file <code>.json</code> atau pulihkan data di perangkat ini secara offline.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Ringkasan Data Saat Ini */}
+        <div className="flex flex-wrap gap-2 text-[11px] font-bold">
+          <span className="px-3 py-1 rounded-xl bg-emerald-50 text-emerald-800 border border-emerald-100">
+            {menuItems.length} Menu
+          </span>
+          <span className="px-3 py-1 rounded-xl bg-emerald-50 text-emerald-800 border border-emerald-100">
+            {orders.length} Transaksi & Tagihan
+          </span>
+          <span className="px-3 py-1 rounded-xl bg-stone-50 text-stone-700 border border-stone-200">
+            {qrisImage ? 'QRIS Tersimpan' : 'Belum Ada QRIS'}
+          </span>
+          <span className="px-3 py-1 rounded-xl bg-stone-50 text-stone-700 border border-stone-200">
+            {storeSettings?.logo ? 'Logo Kustom Aktif' : 'Logo Default'}
+          </span>
+        </div>
+
+        {/* Error Alert Backup/Restore */}
+        {backupErrorMsg && (
+          <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-bold flex items-center gap-2.5 animate-fade-in">
+            <AlertTriangle className="w-4 h-4 text-rose-600 flex-shrink-0" />
+            <span>{backupErrorMsg}</span>
+          </div>
+        )}
+
+        {/* Hidden Input File untuk Restore (.json) */}
+        <input
+          type="file"
+          ref={restoreFileInputRef}
+          accept=".json,application/json"
+          onChange={handleRestoreFileSelect}
+          className="hidden"
+        />
+
+        {/* Tombol Backup & Restore */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+          <button
+            type="button"
+            onClick={handleBackupDownload}
+            className="py-3.5 px-4 rounded-2xl bg-emerald-500 hover:bg-emerald-600 text-white font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md shadow-emerald-500/20 active:scale-95 transition-all"
+          >
+            <Download className="w-4 h-4" />
+            <span>Backup Data (Download)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => restoreFileInputRef.current?.click()}
+            className="py-3.5 px-4 rounded-2xl bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-xs active:scale-95 transition-all"
+          >
+            <Upload className="w-4 h-4 text-amber-700" />
+            <span>Restore Data (Import)</span>
+          </button>
+        </div>
+      </div>
+
+      {/* SEKSI: LOG ERROR & DIAGNOSTIK */}
+      <div className="bg-white rounded-3xl p-5 sm:p-6 border border-stone-100 shadow-sm space-y-4">
+        <div className="flex items-center gap-2 text-stone-700 font-extrabold text-sm">
+          <Bug className="w-4 h-4 text-amber-500" />
+          <span>Log Error &amp; Diagnostik</span>
+        </div>
+
+        <div className="grid grid-cols-3 gap-3 text-center">
+          <div className="p-3 rounded-2xl bg-stone-50 border border-stone-200">
+            <div className="text-xl font-black text-stone-800">{errorLogStats.total}</div>
+            <div className="text-[11px] text-stone-500 font-medium">Total Log</div>
+          </div>
+          <div className="p-3 rounded-2xl bg-amber-50 border border-amber-100">
+            <div className="text-xl font-black text-amber-700">{errorLogStats.unreported}</div>
+            <div className="text-[11px] text-amber-600 font-medium">Belum Terkirim</div>
+          </div>
+          <div className="p-3 rounded-2xl bg-stone-50 border border-stone-200">
+            <div className="text-[11px] text-stone-800 font-bold leading-tight break-all">
+              {errorLogStats.lastTimestamp
+                ? new Date(errorLogStats.lastTimestamp).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })
+                : '—'}
+            </div>
+            <div className="text-[11px] text-stone-500 font-medium">Error Terakhir</div>
+          </div>
+        </div>
+
+        <div className="flex gap-2.5">
+          <button
+            type="button"
+            onClick={() => downloadErrorLogsJson()}
+            className="flex-1 py-2.5 rounded-2xl bg-stone-100 hover:bg-stone-200 text-stone-700 font-bold text-xs flex items-center justify-center gap-1.5 transition-colors"
+          >
+            <Download className="w-4 h-4" />
+            Unduh Log (.json)
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              if (window.confirm('Hapus semua log error lokal? Tindakan ini tidak dapat dibatalkan.')) {
+                clearErrorLogs();
+                setErrorLogStats({ total: 0, unreported: 0, lastTimestamp: null });
+              }
+            }}
+            className="flex-1 py-2.5 rounded-2xl bg-rose-50 hover:bg-rose-100 text-rose-600 font-bold text-xs flex items-center justify-center gap-1.5 transition-colors border border-rose-100"
+          >
+            <Trash2 className="w-4 h-4" />
+            Bersihkan Log
+          </button>
+        </div>
+
+        {errorLogStats.total === 0 && (
+          <p className="text-center text-xs text-stone-400 font-medium py-1">
+            Tidak ada error tercatat. Sistem berjalan normal. ✓
+          </p>
+        )}
+      </div>
+
+      {/* SEKSI 3: PENYEDERHANAAN UI RESET DATA APLIKASI (SATU TOMBOL UTAMA) */}
       <div className="bg-white rounded-3xl p-5 sm:p-6 border border-rose-100 shadow-sm shadow-rose-100/30 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2 text-rose-600 font-extrabold text-sm mb-1">
@@ -541,6 +814,99 @@ export default function SettingsPage() {
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* MODAL KONFIRMASI RESTORE BACKUP (.JSON) */}
+      {showRestoreConfirmModal && pendingBackup && (
+        <div className="fixed inset-0 z-50 bg-stone-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-fade-in">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-amber-200 space-y-5">
+            <div className="flex items-start justify-between pb-3 border-b border-amber-100">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center flex-shrink-0">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-black text-emerald-950">
+                    Konfirmasi Restore Data
+                  </h3>
+                  <span className="text-[11px] text-stone-500 font-semibold truncate block max-w-[230px]">
+                    {pendingBackup.fileName}
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowRestoreConfirmModal(false);
+                  setPendingBackup(null);
+                }}
+                className="w-8 h-8 rounded-full bg-stone-100 text-stone-500 flex items-center justify-center hover:bg-stone-200"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-amber-950 text-xs space-y-2">
+              <p className="font-extrabold text-sm text-amber-900">
+                Restoring will replace all current data on this device. Continue?
+              </p>
+              <p className="text-amber-800/90 leading-relaxed">
+                Seluruh pengaturan toko, logo, QRIS, daftar menu, tagihan aktif, dan riwayat transaksi saat ini akan diganti dengan data dari file backup.
+              </p>
+            </div>
+
+            {/* Ringkasan Isi File Backup */}
+            <div className="p-3.5 rounded-2xl bg-stone-50 border border-stone-200 text-xs space-y-1.5 text-stone-700">
+              <div className="flex justify-between">
+                <span className="text-stone-500">Nama Toko:</span>
+                <span className="font-bold text-emerald-950">
+                  {pendingBackup.payload.data.storeSettings?.name || 'KokiKasir'}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-stone-500">Tanggal Backup:</span>
+                <span className="font-bold text-emerald-950">
+                  {pendingBackup.payload.exportedAt
+                    ? formatDateShortID(getLocalDate(pendingBackup.payload.exportedAt))
+                    : '-'}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-stone-500">Jumlah Menu:</span>
+                <span className="font-bold text-emerald-950">
+                  {pendingBackup.payload.data.menuItems.length} Item
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-stone-500">Transaksi & Tagihan:</span>
+                <span className="font-bold text-emerald-950">
+                  {pendingBackup.payload.data.orders.length} Data
+                </span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowRestoreConfirmModal(false);
+                  setPendingBackup(null);
+                }}
+                className="py-3 rounded-2xl bg-stone-100 hover:bg-stone-200 text-stone-800 font-bold text-xs"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmRestore}
+                className="py-3 rounded-2xl bg-emerald-500 hover:bg-emerald-600 text-white font-black text-xs shadow-md shadow-emerald-500/25 flex items-center justify-center gap-1.5"
+              >
+                <Upload className="w-4 h-4" />
+                <span>Ya, Pulihkan Data</span>
+              </button>
+            </div>
           </div>
         </div>
       )}

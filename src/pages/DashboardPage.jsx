@@ -4,9 +4,12 @@ import Logo from '../components/Logo';
 import { compressImageToBase64 } from '../utils/imageHelper';
 import {
   getLocalDate,
+  getWIBTimeString,
   formatDateToDDMMYYYY,
   isTodayDate,
-  isWithinLast7Days
+  isWithinLast30Days,
+  sortOrdersNewestFirst,
+  groupOrdersByDate
 } from '../utils/dateHelper';
 import {
   Clock,
@@ -28,28 +31,6 @@ import {
   ChevronDown,
   Info
 } from 'lucide-react';
-
-/**
- * Helper untuk mengelompokkan pesanan berdasarkan tanggal
- */
-function groupOrdersByDate(ordersList) {
-  const groups = {};
-  ordersList.forEach(order => {
-    const rawDate = order.date || getLocalDate();
-    if (!groups[rawDate]) {
-      groups[rawDate] = [];
-    }
-    groups[rawDate].push(order);
-  });
-
-  // Urutkan tanggal dari yang terbaru (descending)
-  const sortedDates = Object.keys(groups).sort((a, b) => (b > a ? 1 : -1));
-  return sortedDates.map(date => ({
-    rawDate: date,
-    formattedDate: formatDateToDDMMYYYY(date),
-    orders: groups[date]
-  }));
-}
 
 export default function DashboardPage() {
   const { orders, setOrders, setDraftOrder, setActiveNav, qrisImage, setQrisImage, storeSettings } = useApp();
@@ -88,11 +69,12 @@ export default function DashboardPage() {
     .sort((a, b) => (a.createdAt > b.createdAt ? 1 : -1));
   const unpaidGroups = groupOrdersByDate(unpaidOrders);
 
-  // 2. Filter PAID Orders (HANYA 7 HARI TERAKHIR berdasarkan waktu lokal)
-  const paidOrders = orders
-    .filter(o => o.status === 'PAID')
-    .filter(o => isWithinLast7Days(o.date || getLocalDate()))
-    .sort((a, b) => (b.paidAt || b.createdAt) > (a.paidAt || a.createdAt) ? 1 : -1);
+  // 2. Filter PAID Orders (30 HARI TERAKHIR berdasarkan waktu lokal WIB, terbaru ke terlama)
+  const paidOrders = sortOrdersNewestFirst(
+    orders
+      .filter(o => o.status === 'PAID')
+      .filter(o => isWithinLast30Days(o.date || todayKey))
+  );
   const paidGroups = groupOrdersByDate(paidOrders);
 
   // Fast Cash calculations
@@ -132,7 +114,7 @@ export default function DashboardPage() {
   const handleConfirmPayment = () => {
     if (!selectedOrder) return;
     const now = new Date();
-    const paidTimeString = now.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+    const paidTimeString = getWIBTimeString(now);
 
     const paidRecord = {
       ...selectedOrder,
@@ -141,6 +123,7 @@ export default function DashboardPage() {
       cashGiven: paymentMethod === 'TUNAI' ? numCashGiven : selectedOrder.total,
       change: paymentMethod === 'TUNAI' ? changeAmount : 0,
       paidAt: paidTimeString,
+      paidTimestamp: now.getTime(),
       date: selectedOrder.date || getLocalDate()
     };
 
@@ -207,8 +190,8 @@ export default function DashboardPage() {
         <button
           onClick={() => setActiveTab('unpaid')}
           className={`flex-1 py-2.5 px-3 sm:px-4 rounded-xl font-bold text-xs sm:text-sm transition-all duration-200 flex items-center justify-center gap-2 ${activeTab === 'unpaid'
-              ? 'bg-emerald-500 text-white shadow-sm shadow-emerald-500/25'
-              : 'text-emerald-900/70 hover:bg-emerald-50'
+            ? 'bg-emerald-500 text-white shadow-sm shadow-emerald-500/25'
+            : 'text-emerald-900/70 hover:bg-emerald-50'
             }`}
         >
           <span>Tagihan Terbuka</span>
@@ -223,8 +206,8 @@ export default function DashboardPage() {
         <button
           onClick={() => setActiveTab('history')}
           className={`flex-1 py-2.5 px-3 sm:px-4 rounded-xl font-bold text-xs sm:text-sm transition-all duration-200 flex items-center justify-center gap-2 ${activeTab === 'history'
-              ? 'bg-emerald-500 text-white shadow-sm shadow-emerald-500/25'
-              : 'text-emerald-900/70 hover:bg-emerald-50'
+            ? 'bg-emerald-500 text-white shadow-sm shadow-emerald-500/25'
+            : 'text-emerald-900/70 hover:bg-emerald-50'
             }`}
         >
           <span>Riwayat Lunas</span>
@@ -348,19 +331,19 @@ export default function DashboardPage() {
       {/* Tab 2: HISTORY (PAID) Orders Grouped by Date dengan SISTEM ACCORDION */}
       {activeTab === 'history' && (
         <div className="space-y-4">
-          {/* Banner Informasi Pembatasan 7 Hari Terakhir */}
+          {/* Banner Informasi Rentang 30 Hari Terakhir */}
           <div className="flex items-center justify-between px-4 py-2.5 bg-emerald-50/70 border border-emerald-100 rounded-2xl text-xs text-emerald-900">
             <div className="flex items-center gap-2">
               <Info className="w-4 h-4 text-emerald-600 flex-shrink-0" />
               <span>
-                Menampilkan riwayat lunas <strong>7 hari terakhir</strong>. Data arsip lengkap tersedia di halaman <strong>Laporan</strong>.
+                Menampilkan riwayat lunas <strong>30 hari terakhir</strong>. Data arsip lengkap & ekspor Excel tersedia di halaman <strong>Laporan</strong>.
               </span>
             </div>
           </div>
 
           {paidGroups.length === 0 ? (
             <div className="bg-white rounded-3xl p-10 text-center border border-emerald-100 text-stone-500 text-xs">
-              Belum ada riwayat pesanan yang lunas dalam 7 hari terakhir.
+              Belum ada riwayat pesanan yang lunas dalam 30 hari terakhir.
             </div>
           ) : (
             paidGroups.map(group => {
@@ -609,8 +592,8 @@ export default function DashboardPage() {
                   type="button"
                   onClick={() => setPaymentMethod('QRIS')}
                   className={`py-3 rounded-2xl font-bold text-xs flex items-center justify-center gap-2 border transition-all ${paymentMethod === 'QRIS'
-                      ? 'bg-emerald-500 text-white border-emerald-500 shadow-sm shadow-emerald-500/25'
-                      : 'bg-white text-emerald-900 border-emerald-200 hover:bg-emerald-50'
+                    ? 'bg-emerald-500 text-white border-emerald-500 shadow-sm shadow-emerald-500/25'
+                    : 'bg-white text-emerald-900 border-emerald-200 hover:bg-emerald-50'
                     }`}
                 >
                   <CreditCard className="w-4 h-4" />
@@ -621,8 +604,8 @@ export default function DashboardPage() {
                   type="button"
                   onClick={() => setPaymentMethod('TUNAI')}
                   className={`py-3 rounded-2xl font-bold text-xs flex items-center justify-center gap-2 border transition-all ${paymentMethod === 'TUNAI'
-                      ? 'bg-emerald-500 text-white border-emerald-500 shadow-sm shadow-emerald-500/25'
-                      : 'bg-white text-emerald-900 border-emerald-200 hover:bg-emerald-50'
+                    ? 'bg-emerald-500 text-white border-emerald-500 shadow-sm shadow-emerald-500/25'
+                    : 'bg-white text-emerald-900 border-emerald-200 hover:bg-emerald-50'
                     }`}
                 >
                   <Banknote className="w-4 h-4" />
@@ -856,16 +839,18 @@ export default function DashboardPage() {
                 className="flex-1 py-3 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-800 font-bold text-xs flex items-center justify-center gap-1.5"
               >
                 <Printer className="w-4 h-4" />
-                <span>Cetak</span>
+                <span>Cetak Nota</span>
               </button>
               <button
                 onClick={() => {
                   setShowReceiptModal(false);
-                  setActiveTab('history');
+                  setDraftOrder({ customerName: '', orderType: 'Makan Sini', items: {}, editingOrderId: null });
+                  setActiveNav('home');
                 }}
-                className="flex-1 py-3 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white font-extrabold text-xs shadow-md shadow-emerald-500/25"
+                className="flex-1 py-3 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white font-extrabold text-xs shadow-md shadow-emerald-500/25 flex items-center justify-center gap-1.5"
               >
-                Selesai
+                <PlusCircle className="w-4 h-4" />
+                <span>Transaksi Baru</span>
               </button>
             </div>
           </div>

@@ -24,7 +24,7 @@ export function AppProvider({ children }) {
     }
   });
 
-  // Orders / Bills (persisted in localStorage)
+  // Orders / Bills (persisted in localStorage; no auto-cleanup at midnight so 30+ days of history are retained)
   const [orders, setOrders] = useState(() => {
     try {
       const saved = localStorage.getItem('kokikasir_orders');
@@ -103,6 +103,48 @@ export function AppProvider({ children }) {
   const unpaidCount = orders.filter(o => o.status === 'UNPAID').length;
   const paidCount = orders.filter(o => o.status === 'PAID').length;
 
+  // Restore all app data from a validated backup object
+  const restoreBackup = (backupData) => {
+    const nextStoreSettings = {
+      ...DEFAULT_STORE_SETTINGS,
+      ...(backupData.storeSettings || {})
+    };
+    const nextQrisImage = typeof backupData.qrisImage === 'string' ? backupData.qrisImage : '';
+    const nextMenuItems = Array.isArray(backupData.menuItems) ? backupData.menuItems : [];
+    const nextOrders = Array.isArray(backupData.orders) ? backupData.orders : [];
+
+    // Clear existing local database keys before inserting restored data
+    localStorage.removeItem('kokikasir_store_settings');
+    localStorage.removeItem('kokikasir_qris_image');
+    localStorage.removeItem('kokikasir_menu');
+    localStorage.removeItem('kokikasir_orders');
+
+    localStorage.setItem('kokikasir_store_settings', JSON.stringify(nextStoreSettings));
+    if (nextQrisImage) {
+      localStorage.setItem('kokikasir_qris_image', nextQrisImage);
+    }
+    localStorage.setItem('kokikasir_menu', JSON.stringify(nextMenuItems));
+    localStorage.setItem('kokikasir_orders', JSON.stringify(nextOrders));
+
+    setStoreSettings(nextStoreSettings);
+    setQrisImage(nextQrisImage);
+    setMenuItems(nextMenuItems);
+    setOrders(nextOrders);
+    setDraftOrder({
+      customerName: '',
+      orderType: 'Makan Sini',
+      items: {},
+      editingOrderId: null
+    });
+
+    return {
+      storeSettings: nextStoreSettings,
+      qrisImage: nextQrisImage,
+      menuItems: nextMenuItems,
+      orders: nextOrders
+    };
+  };
+
   return (
     <AppContext.Provider
       value={{
@@ -119,7 +161,8 @@ export function AppProvider({ children }) {
         draftOrder,
         setDraftOrder,
         unpaidCount,
-        paidCount
+        paidCount,
+        restoreBackup
       }}
     >
       {children}
