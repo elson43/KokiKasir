@@ -1,59 +1,111 @@
-# Spesifikasi Sistem KokiKasir (PWA POS)
+# KokiKasir — Konteks Proyek (PWA POS)
 
-Buatkan saya aplikasi Point of Sales (POS) berbasis web berupa PWA (Progressive Web App) bernama **"KokiKasir"** yang 100% responsif (mobile & tablet-friendly), didesain khusus untuk koki yang merangkap sebagai kasir.
+Aplikasi Point of Sales berbasis web (PWA), 100% responsif (mobile, tablet, laptop), untuk koki yang merangkap kasir. Fokus pada sistem **Open Bill**: tanpa nomor meja, tanpa manajemen stok, tanpa diskon.
 
-## 🎨 ATURAN DESAIN UI/UX (FRIENDLY MINIMALIST - JADE ORNAMENT VIBES)
-- **Warna & Tema:** Gunakan inspirasi warna *Jade Ornament* (Giok) yang segar, ramah, menenangkan, dan tidak mencekam.
-  - **Background Utama:** Gunakan hijau giok super muda/putih susu (`bg-emerald-50` atau `bg-teal-50`).
-  - **Kartu & Kontainer:** Putih bersih (`bg-white`) dengan bayangan sangat lembut bernuansa hijau (`shadow-sm shadow-emerald-100/50`).
-  - **Tombol Aksi Utama:** Gunakan hijau giok yang *soft* namun jelas (`bg-emerald-500` atau `bg-teal-500`) saat *hover* menjadi sedikit lebih gelap.
-  - **Teks Utama:** Hindari hitam pekat yang kaku. Gunakan abu-abu kehijauan gelap (`text-emerald-950` atau `text-stone-800`) agar lebih ramah di mata.
-- **Bentuk & Sudut:** Wajib gunakan sudut melengkung yang lembut dan *bouncy* (`rounded-2xl` atau `rounded-3xl` pada elemen besar, `rounded-xl` pada tombol) agar UI terasa *friendly* dan modern.
-- **Logo & Ikonografi:** Buatkan placeholder SVG Logo gabungan antara "Topi Koki" dan "Tablet/Monitor" dengan gaya *line-art* menggunakan warna `text-emerald-600`. Letakkan logo dan nama "KokiKasir" di: (1) Splash Screen, (2) Header/Sidebar, dan (3) Struk Digital.
+## Tech Stack
+- React 18 + Vite 5 (`npm run dev` → http://localhost:3000, `npm run build`, `npm run preview`)
+- Tailwind CSS 3, `lucide-react` (ikon), `xlsx` (export Excel), `jsqr` & `qrcode` (decode & render QRIS offline), `clsx`, `tailwind-merge`
+- PWA: `public/manifest.json`, `public/sw.js` (didaftarkan di `index.html`), `public/logo.svg`
+- Tanpa router: navigasi lewat state `activeNav` di `AppContext` (`home | dashboard | menu | reports | settings`), dirender di `src/App.jsx`
+- Tanpa TypeScript, tanpa test runner
 
-## 🏗️ ARSITEKTUR & TEKNOLOGI UTAMA
-1. **Offline-First & Reliable:** Gunakan LocalStorage, IndexedDB, atau state management (jika React/Vue) untuk menyimpan data sementara agar aplikasi berfungsi tanpa internet dan bisa didemokan. Tambahkan manifest PWA agar aplikasi bisa di "Add to Home Screen".
-2. **Navigasi Efisien:** Gunakan "Bottom Navigation Bar" berlatar putih dengan ikon *outline* tipis untuk layar mobile/tablet, dan Sidebar ringkas untuk laptop.
-3. **Animasi Startup (Splash Screen):** Saat aplikasi dibuka, tampilkan Splash Screen full-screen (`bg-emerald-50`) selama 2 detik. Tampilkan Logo KokiKasir dan teks dengan animasi *fade-in* yang ceria/halus, lalu otomatis pindah ke Halaman Home.
+## Struktur `src/`
+| Path | Isi |
+|---|---|
+| `main.jsx` | Entry; membungkus `<App/>` dengan `ErrorBoundary`, memasang `window.onerror` & `onunhandledrejection` → `logError` |
+| `App.jsx` | `AppProvider`, Splash Screen 2 detik, `Layout`, switch halaman |
+| `context/AppContext.jsx` | State global (menu, orders, draftOrder, QRIS, storeSettings, activeNav) + `restoreBackup()` |
+| `components/` | `Layout`, `Sidebar` (desktop), `BottomNav` (mobile/tablet), `Header`, `SplashScreen`, `Logo`, `ErrorBoundary`, `QrisStatusBadge` |
+| `pages/` | `HomePage`, `DashboardPage`, `MenuManagementPage`, `ReportsPage`, `SettingsPage` |
+| `hooks/useNetworkStatus.js` | `{ isOnline, syncState, setSyncState }` (event online/offline + status sinkronisasi global dari `syncService`) |
+| `utils/dateHelper.js` | Semua tanggal/jam WIB (`Asia/Jakarta`), filter 7/30 hari, grouping per tanggal, `formatWIBDateTime` |
+| `utils/imageHelper.js` | Kompresi gambar agresif per preset (`menu`, `logo`, `qris`) → Base64 |
+| `utils/qrisHelper.js` | Static-to-Dynamic QRIS offline (EMVCo TLV parser/serializer, CRC-16/CCITT-FALSE, decode multi-pass `jsqr`, render `qrcode`) |
+| `utils/bluetoothPrinter.js` | Web Bluetooth + encoder ESC/POS 58mm (32 karakter/baris) |
+| `utils/errorLogger.js` | Log error senyap (maks 100, data sensitif di-scrub) |
+| `lib/syncService.js` | Cadangan cloud Google Drive (Apps Script) + status sinkronisasi + waktu terakhir cadangan |
 
-Aplikasi ini berfokus pada sistem "Open Bill" tanpa nomor meja, tanpa manajemen stok mentah, dan tanpa sistem diskon. 
+## Kompresi Gambar
+`compressImageToBase64(file, preset)` di `utils/imageHelper.js` (output WebP, fallback JPEG; kualitas diturunkan bertahap, lalu dimensi diperkecil bila masih terlalu besar):
+- `menu`: maks 280×280 px, kualitas 0.6 → 0.35, Base64 < ~45 KB (dipakai foto menu)
+- `logo`: maks 200×200 px, Base64 < ~35 KB (dipakai logo toko)
+- `qris`: maks 520×520 px, kualitas 0.78 (min 0.6), latar putih agar terbaca scanner, Base64 < ~120 KB (dipakai QRIS di Dashboard)
+- `AppContext` menulis ke penyimpanan lewat `safeWrite`: error kuota dicatat senyap via `errorLogger` dan memunculkan banner ramah (di `Layout`): "Memori perangkat hampir penuh. Hapus sebagian foto menu atau lakukan backup data."
 
-## 📦 MODUL UTAMA APLIKASI
+## Printer Bluetooth 58mm
+`utils/bluetoothPrinter.js` (hanya Chrome/Android/Laptop; cek `isBluetoothSupported()`):
+- `connectPrinter()` memakai `acceptAllDevices` + `optionalServices` (UUID 18f0, ff00, 49535343-…, e7810a71-…, ae30), mencari karakteristik pertama yang mendukung `write`/`writeWithoutResponse`; koneksi disimpan di memori modul dan status diperbarui lewat event `gattserverdisconnected` (`getPrinterStatus`, `subscribePrinterStatus`)
+- `buildReceiptEscPos(order, storeSettings)`: init, nama toko tebal tengah, telepon/jam, garis pemisah, tanggal & jam WIB, pelanggan & tipe, item (nama, qty × harga, subtotal rata kanan), TOTAL, metode (Tunai + Uang Diterima + Kembalian, atau QRIS), pesan penutup, 4 baris kosong. Teks dikonversi ke ASCII
+- Data dikirim per 20 byte dengan jeda 20 ms; tersedia `printReceipt`, `printTestReceipt`, `disconnectPrinter`
 
-### 1. HALAMAN PEMBUATAN PESANAN (HOME / BERANDA)
-- Setelah Splash Screen selesai, halaman ini adalah Beranda utama.
-- Saat membuka halaman ini, koki WAJIB memasukkan "Nama Pelanggan" di sebuah text input (tanpa border kasar, gunakan `bg-emerald-100/50` dengan focus ring hijau soft).
-- **Tipe Pesanan:** Sediakan Toggle/Radio Button wajib pilih: "Makan Sini" (Dine-in) atau "Bungkus" (Takeaway) di dekat Nama Pelanggan.
-- Sediakan Filter Kategori Menu (Misal: Makanan, Minuman, Snack) berupa tombol/chips membulat di bagian atas.
-- Tampilkan katalog menu dalam bentuk Grid. Menu "Habis" di-gray-out (tidak bisa diklik). Menu "Sembunyikan" jangan ditampilkan.
-- Tiap kotak menu menampilkan: Gambar (rounded), Nama, Harga, dan Kontrol Kuantitas (default 0).
-- **Kontrol Kuantitas:** Sediakan tombol (+) dan (-), serta angka kuantitas yang bisa diklik dan diketik langsung (direct edit input).
-- **Catatan Item:** Jika kuantitas menu > 0, munculkan input teks kecil "Catatan" di bawah menu tersebut (misal: "tanpa bawang", "pedas").
-- Di bagian bawah, tampilkan ringkasan pesanan dan Grand Total secara real-time. (Angka total gunakan teks *oversized*, tebal, warna `text-emerald-700`).
-- **Tombol aksi:** "Simpan & Buka Tagihan". Jika ditekan, catat waktu, status "UNPAID", dan pindahkan ke Dashboard.
+## Penyimpanan Data
+Semua data disimpan di perangkat lewat `localStorage` (bukan IndexedDB/Dexie). Key harus tetap persis:
+`kokikasir_menu`, `kokikasir_orders`, `kokikasir_qris_image`, `kokikasir_store_settings` (termasuk `printerMode`, `autoPrint`, `lastPrinterName`, `cloudBackupUrl`, `cloudBackupPin`, `qrisPayload`, `qrisMerchantName`, `qrisMerchantCity`), `kokikasir_error_logs`, `kokikasir_last_synced_at`.
+- Transaksi PAID **tidak** dihapus otomatis saat pergantian hari; riwayat minimal 30 hari tetap tersimpan.
+- Teks UI untuk pengguna tidak boleh menyebut istilah teknis ("LocalStorage", "IndexedDB", "Dexie", "Penyimpanan Lokal"). Gunakan: "Tersimpan otomatis di perangkat", "Mode Offline — data tersimpan otomatis di perangkat", "Data di perangkat ini".
 
-### 2. HALAMAN MANAJEMEN MENU (DATA MASTER)
-- **Fitur:** Tambah dan Edit menu. Input mencakup: Gambar Menu (URL/Upload), Nama Produk, Kategori, dan Harga Jual.
-- **Status/Visibilitas Menu:** Berikan 3 opsi untuk tiap menu:
-  a. Tersedia (Tampil normal).
-  b. Habis / Sold Out (Tampil di menu tapi di-gray out).
-  c. Sembunyikan (Tidak tampil di Pemesanan, tapi data tidak dihapus permanen).
-- Perubahan harga di sini TIDAK merubah harga pada riwayat pesanan yang sudah PAID.
+## Aturan Desain (Jade Ornament, friendly minimalist)
+- Latar `bg-emerald-50`; kartu `bg-white` + `shadow-sm shadow-emerald-100/50`
+- Aksi utama `bg-emerald-500` (hover lebih gelap); aksi sekunder `bg-stone-100`/`bg-stone-200`; bahaya `bg-rose-500`
+- Teks `text-emerald-950` / `text-stone-800` (hindari hitam pekat)
+- Sudut `rounded-2xl`/`rounded-3xl` (elemen besar), `rounded-xl` (tombol)
+- Logo (topi koki + tablet, line-art `text-emerald-600`) tampil di Splash, Header/Sidebar, dan Struk Digital
+- Bahasa UI: Indonesia
 
-### 3. HALAMAN DASHBOARD (UNPAID & HISTORY PAID)
-Buat halaman dengan sistem 2 Tabs:
-- **TAB UNPAID (Belum Lunas):** Tampilkan daftar pesanan HARI INI berupa kartu *soft*. Urutkan dari yang terlama. Kartu menampilkan: Nama Pelanggan, Tipe Pesanan, Jam Pesan, dan Total.
-- Jika kartu diklik, muncul rincian pesanan beserta 3 tombol aksi:
-  1. **"Tambah Pesanan" (Update Order):** Mengarahkan kembali ke Home untuk menyuntikkan menu (Open Bill).
-  2. **"Batalkan Tagihan" (Void):** Menghapus pesanan (dengan pop-up konfirmasi bernada peringatan warna merah *soft* / `bg-rose-500`).
-  3. **"Bayar":** Menuju proses checkout.
-- **Proses Bayar:** Pilih metode QRIS atau TUNAI.
-- **Fitur Tunai Cepat:** Jika TUNAI dipilih, tampilkan input field "Uang Diterima" dan otomatis hitung "Kembalian" secara real-time. Sediakan 3 tombol nominal cepat (Misal: "Uang Pas", "50.000", "100.000").
-- **Struk Digital:** Setelah dibayar, munculkan Pop-Up UI "Struk Digital" berlatar putih dengan Logo KokiKasir di atasnya, layout menyerupai kertas struk kasir. Setelah ditutup, pindahkan pesanan ke Tab History.
+## Modul Aplikasi
 
-### 4. HALAMAN LAPORAN KEUANGAN (REPORT) & BACKUP
-- Menarik data transaksi berstatus PAID. Sediakan Date Picker: "Hari Ini", "Minggu Ini", "Custom".
-- Tampilkan 3 indikator: TOTAL OMSET, TOTAL QRIS, dan TOTAL TUNAI (Gunakan ikon hijau *soft* di tiap kartunya).
-- Tampilkan Tabel Riwayat Transaksi (Nama, Tipe, Waktu, Metode, Total).
-- **Laporan Bestseller:** Tampilkan tabel "Item Terjual" (Nama Menu & Total Porsi) sebagai acuan belanja koki.
-- **Keamanan Data (Backup):** Tambahkan tombol "Export Data (CSV)" dengan warna sekunder (misal `bg-stone-200` teks `text-stone-700`) agar koki bisa mengunduh riwayat transaksi.
+### 1. Home (Buat Pesanan)
+- Wajib isi **Nama Pelanggan**; toggle **Makan Sini / Bungkus**
+- Filter kategori (chips), katalog grid (2 kolom di HP). Menu "Habis" di-gray-out, "Sembunyikan" tidak tampil
+- Kontrol qty (+/−, input langsung), catatan item muncul jika qty > 0
+- Ringkasan + Grand Total real-time; tombol **"Simpan & Buka Tagihan"** → status UNPAID, pindah ke Dashboard
+- Mode edit (Tambah Pesanan) memakai `draftOrder.editingOrderId`
+
+### 2. Manajemen Menu
+- Tambah/edit/hapus menu: gambar (upload/URL), nama, kategori, harga, status `Tersedia | Habis | Sembunyikan`
+- Daftar menu berupa **accordion per kategori**; saat halaman dimuat semua kategori **tertutup** (`expandedCategories = []`), terbuka hanya jika header diklik
+- Perubahan harga tidak mengubah transaksi PAID lama
+
+### 3. Dashboard (2 tab)
+- **Unpaid:** pesanan belum lunas, terlama di atas. Detail punya aksi **Tambah Pesanan**, **Batalkan Tagihan** (konfirmasi merah soft), **Bayar**
+- **Bayar:** QRIS atau Tunai. Tunai: input "Uang Diterima", kembalian otomatis, tombol nominal cepat (Uang Pas, 50.000, 100.000). QRIS: jika `qrisPayload` tersedia, render QRIS Dinamis dengan nominal terkunci, badge "QRIS Dinamis", nama merchant terverifikasi, pengingat cek layar pembeli dengan jam WIB di atas tombol **Konfirmasi Lunas**, serta toggle "Tampilkan gambar QRIS asli". Jika belum terbaca, fallback otomatis ke gambar QRIS statis (`kokikasir_qris_image`). Foto QRIS lama otomatis dicoba dibaca satu kali saat aplikasi dibuka
+- **History (Riwayat Lunas):** 30 hari terakhir (WIB), terbaru ke terlama, dikelompokkan per tanggal
+- **Struk Digital** (preview 58mm, logo/nama/bio toko dari Pengaturan) hanya punya dua tombol: **Cetak Nota** (sekunder) dan **Transaksi Baru** (utama; tutup struk, reset draft, ke Home)
+- `handlePrintReceipt(order)` memilih rute berdasar `storeSettings.printerMode`: `bluetooth` → kirim byte ESC/POS ke printer terhubung (bila belum terhubung/gagal, tampil pemberitahuan lalu fallback cetak browser); `browser` → `window.print()` dengan CSS struk 58mm (`body.receipt-printing`, elemen `#receipt-print`, di `index.css`); `none` → cetak manual tetap memakai cetak browser dan Cetak Otomatis tidak pernah berjalan
+- Jika `autoPrint` aktif dan mode bukan `none`, nota dicetak otomatis satu kali setelah pembayaran selesai
+- Tidak ada fitur berbagi WhatsApp
+
+### 4. Laporan
+- Filter: **Hari Ini | 7 Hari | 30 Hari (default) | Custom** (WIB)
+- Indikator: Total Omset, Total QRIS, Total Tunai, jumlah transaksi — dihitung ulang sesuai filter
+- Riwayat transaksi dikelompokkan per tanggal, plus tabel Bestseller (Item Terjual)
+- Tombol **Export Excel (.xlsx)** mengekspor persis data sesuai filter aktif
+
+### 5. Pengaturan
+- **Personalisasi Nota & Toko:** logo (kamera/galeri), nama, telepon, jam operasional, pesan penutup struk
+- **QRIS Pembayaran:** unggah/foto QRIS langsung di Pengaturan (selain modal Bayar) lewat `saveQrisFromFile()` dengan status `QrisStatusBadge` ("QRIS Dinamis Aktif" + nama merchant, atau catatan statis jika buram). Reset QRIS menghapus `kokikasir_qris_image` sekaligus `qrisPayload`/`qrisMerchantName`/`qrisMerchantCity`
+- **Pengaturan Nota & Printer:** mode `printerMode` = `none` ("Tanpa Printer (Digital)", default) | `browser` ("Cetak Browser (58mm / A4)") | `bluetooth` ("Printer Bluetooth (58mm)"), toggle `autoPrint` ("Cetak Otomatis setelah Bayar", nonaktif bila mode `none`), `lastPrinterName`. Panel Bluetooth: pesan jika browser tidak mendukung, badge "Terhubung: [nama]"/"Belum terhubung", tombol Cari & Hubungkan Printer, Putuskan, Tes Cetak
+- **Backup & Restore (.json):** `Backup Data (Download)` → `kokikasir-backup-YYYY-MM-DD.json` berformat `{ app: "KokiKasir", version: 1, exportedAt, data: { storeSettings, qrisImage, menuItems, orders } }` (tanpa PIN cloud). `Restore Data (Import)` memvalidasi file, menampilkan modal konfirmasi ("Restoring will replace all current data on this device. Continue?"), lalu mengganti data dan memperbarui state lewat `restoreBackup()`. Di bawahnya ada panel Cadangan Otomatis (Google Drive), lihat bagian Cloud Backup
+- **Reset Data:** pilih granular (transaksi / menu / QRIS), konfirmasi 2 langkah (ketik `HAPUS`)
+- Tidak ada UI log error/diagnostik untuk pengguna
+
+## Status Jaringan & Error Handling
+- `Header` menampilkan badge: **Online** (Wifi hijau), **Syncing...** (ikon berputar), **Offline** (WifiOff abu-abu)
+- Crash fatal: `ErrorBoundary` hanya menampilkan "Terjadi kendala. Muat ulang aplikasi." + tombol **Muat Ulang**. Detail error dicatat senyap lewat `errorLogger` (id, timestamp, message, stack, route, appVersion `1.3.0`, `reported`); token/password/header sensitif di-scrub sebelum disimpan. Pengguna tidak pernah melihat log/stack trace
+
+## Cloud Backup (Google Drive via Apps Script)
+Sinkronisasi ringan tanpa dependensi (hanya `fetch`) di `lib/syncService.js`; tidak ada Supabase lagi:
+- Pengguna mengisi **Link Cadangan Cloud** (URL Web App Google Apps Script) dan **Kode Keamanan (PIN)** opsional di Pengaturan → tersimpan sebagai `cloudBackupUrl` & `cloudBackupPin` dalam `kokikasir_store_settings`
+- `pushCloudBackup(url, pin, payload)`: `POST` `Content-Type: text/plain;charset=utf-8` (menghindari preflight CORS) dengan body `{ pin, payload }`. `pullCloudBackup(url, pin)`: `GET ?pin=...`. Apps Script membalas `{ ok, payload?, error? }`
+- Payload = format backup yang sama (`{ app, version: 1, exportedAt, data }`); `buildBackupPayload()` membuang PIN. File backup `.json` lokal juga tidak memuat PIN
+- `runCloudBackup()` mengatur status global (`idle | syncing | error`) yang dibaca `useNetworkStatus` (Header menampilkan "Syncing..."). Bila link kosong atau offline: tidak melakukan apa-apa, tanpa error
+- `AppContext` memicu cadangan otomatis (debounce ±3 detik) saat orders/menu/pengaturan/QRIS berubah dan saat perangkat kembali online setelah offline; hasilnya memperbarui `kokikasir_last_synced_at` (ISO, ditampilkan WIB lewat `formatWIBDateTime`)
+- Pengaturan → panel collapsible **Cadangan Otomatis (Google Drive)**: input link & PIN, waktu terakhir dicadangkan, tombol **Cadangkan Sekarang** dan **Ambil Data dari Cloud** (pull → validasi → modal konfirmasi restore yang sama → `restoreBackup()`)
+- `restoreBackup()` mempertahankan link/PIN cloud perangkat bila file cadangan tidak memilikinya
+- Belum ada: login/akun, `userId`/`syncStatus` per record, skrip Apps Script bawaan di repo, pengiriman otomatis error log ke cloud
+
+## Konvensi Kerja
+- Semua tanggal/jam lewat `utils/dateHelper.js` (WIB), jangan pakai `new Date()` mentah untuk logika tanggal laporan
+- Verifikasi perubahan dengan `npx vite build` (peringatan chunk > 500 kB normal)
+- Di PowerShell gunakan `;` bukan `&&`
+- Setiap kali menambah/mengubah fitur, struktur `src/`, atau alur sinkronisasi, wajib perbarui file konteks ini agar selalu sinkron dengan kondisi kode terbaru.

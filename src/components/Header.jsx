@@ -31,7 +31,7 @@ export default function Header() {
     dashboard: { title: 'Dashboard Tagihan', desc: 'Kelola Open Bill & Bayar Kasir' },
     menu: { title: 'Manajemen Menu Master', desc: 'Atur ketersediaan & urutan menu' },
     reports: { title: 'Laporan Penjualan', desc: 'Ringkasan omset & riwayat transaksi' },
-    settings: { title: 'Pengaturan Sistem', desc: 'Kelola data lokal & reset terspesifikasi' },
+    settings: { title: 'Pengaturan Sistem', desc: 'Kelola data di perangkat ini & pengaturan toko' },
   };
 
   const currentInfo = titles[activeNav] || titles.home;

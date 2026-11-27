@@ -103,7 +103,7 @@ export function logError({ message, stack, route, componentStack }) {
 }
 
 /**
- * Marks a list of log entries as reported (e.g., after uploading to Supabase).
+ * Marks a list of log entries as reported (e.g., after being sent to a remote service).
  * @param {string[]} ids
  */
 export function markLogsAsReported(ids) {
@@ -131,30 +131,4 @@ export function clearErrorLogs() {
  */
 export function getUnreportedLogs() {
   return readErrorLogs().filter(e => !e.reported);
-}
-
-/**
- * Exports all logs as a downloadable JSON file.
- */
-export function downloadErrorLogsJson() {
-  const logs = readErrorLogs();
-  const payload = {
-    app: 'KokiKasir',
-    version: APP_VERSION,
-    exportedAt: new Date().toISOString(),
-    totalEntries: logs.length,
-    unreportedEntries: logs.filter(e => !e.reported).length,
-    logs
-  };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], {
-    type: 'application/json'
-  });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = `kokikasir-error-log-${new Date().toISOString().split('T')[0]}.json`;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
 }

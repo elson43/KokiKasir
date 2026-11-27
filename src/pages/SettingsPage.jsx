@@ -1,9 +1,23 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { compressImageToBase64 } from '../utils/imageHelper';
-import { getLocalDate, formatDateShortID } from '../utils/dateHelper';
-import { readErrorLogs, downloadErrorLogsJson, clearErrorLogs } from '../utils/errorLogger';
+import { getLocalDate, formatDateShortID, formatWIBDateTime } from '../utils/dateHelper';
+import {
+  isBluetoothSupported,
+  getPrinterStatus,
+  subscribePrinterStatus,
+  connectPrinter,
+  disconnectPrinter,
+  printTestReceipt
+} from '../utils/bluetoothPrinter';
+import {
+  runCloudBackup,
+  pullCloudBackup,
+  getLastSyncedAt
+} from '../lib/syncService';
+import { useNetworkStatus } from '../hooks/useNetworkStatus';
 import Logo from '../components/Logo';
+import QrisStatusBadge from '../components/QrisStatusBadge';
 import { 
   Settings, 
   Trash2, 
@@ -25,7 +39,11 @@ import {
   Info,
   Database,
   AlertTriangle,
-  Bug
+  Printer,
+  Bluetooth,
+  Cloud,
+  ChevronDown,
+  CreditCard
 } from 'lucide-react';
 
 /**
@@ -51,7 +69,17 @@ function isValidKokiKasirBackup(parsed) {
 }
 
 export default function SettingsPage() {
-  const { menuItems, orders, qrisImage, storeSettings, setStoreSettings, restoreBackup } = useApp();
+  const {
+    menuItems,
+    orders,
+    qrisImage,
+    saveQrisFromFile,
+    clearQris,
+    qrisDecoding,
+    storeSettings,
+    setStoreSettings,
+    restoreBackup
+  } = useApp();
 
   // Local state for Store Customization form
   const [storeForm, setStoreForm] = useState({
@@ -66,24 +94,29 @@ export default function SettingsPage() {
   const [saveSuccessMsg, setSaveSuccessMsg] = useState('');
   const [backupErrorMsg, setBackupErrorMsg] = useState('');
 
-  // Refs for Logo Upload (Camera & Gallery) & Backup Restore File Input
+  // Refs for Logo Upload (Camera & Gallery), QRIS Upload, & Backup Restore File Input
   const logoCameraRef = useRef(null);
   const logoGalleryRef = useRef(null);
+  const qrisCameraRef = useRef(null);
+  const qrisGalleryRef = useRef(null);
   const restoreFileInputRef = useRef(null);
+
+  const handleSettingsQrisUpload = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    const result = await saveQrisFromFile(file);
+    if (result?.ok) {
+      showSuccessToast('QRIS Dinamis aktif! Nominal akan terisi otomatis saat pembeli scan.');
+    } else {
+      showSuccessToast('Foto QRIS tersimpan sebagai QRIS statis.');
+    }
+  };
 
   // Restore Backup Confirmation Modal State
   const [showRestoreConfirmModal, setShowRestoreConfirmModal] = useState(false);
   const [pendingBackup, setPendingBackup] = useState(null);
-
-  // Error Log Stats
-  const [errorLogStats, setErrorLogStats] = useState({ total: 0, unreported: 0, lastTimestamp: null });
-
-  useEffect(() => {
-    const logs = readErrorLogs();
-    const unreported = logs.filter(l => !l.reported).length;
-    const lastTimestamp = logs.length > 0 ? logs[logs.length - 1].timestamp : null;
-    setErrorLogStats({ total: logs.length, unreported, lastTimestamp });
-  }, []);
 
   const showSuccessToast = (msg) => {
     setSaveSuccessMsg(msg);
@@ -130,7 +163,7 @@ export default function SettingsPage() {
 
     try {
       setIsProcessingLogo(true);
-      const base64 = await compressImageToBase64(file, 400, 0.85);
+      const base64 = await compressImageToBase64(file, 'logo');
       setStoreForm(prev => ({ ...prev, logo: base64 }));
     } catch (err) {
       alert('Gagal memproses logo toko: ' + err.message);
@@ -143,7 +176,7 @@ export default function SettingsPage() {
   // Save Store Settings
   const handleSaveStoreSettings = (e) => {
     e.preventDefault();
-    setStoreSettings(storeForm);
+    setStoreSettings(prev => ({ ...prev, ...storeForm }));
     showSuccessToast('Pengaturan toko & personalisasi nota berhasil disimpan!');
   };
 
@@ -163,6 +196,9 @@ export default function SettingsPage() {
 
     try {
       const storedSettings = readStoredJson('kokikasir_store_settings', storeSettings);
+      // PIN cloud bersifat rahasia dan tidak ikut dalam file backup
+      // eslint-disable-next-line no-unused-vars
+      const { cloudBackupPin, ...settingsWithoutPin } = storedSettings || {};
       const storedQris = localStorage.getItem('kokikasir_qris_image') ?? qrisImage ?? '';
       const storedMenu = readStoredJson('kokikasir_menu', menuItems);
       const storedOrders = readStoredJson('kokikasir_orders', orders);
@@ -172,7 +208,7 @@ export default function SettingsPage() {
         version: 1,
         exportedAt: new Date().toISOString(),
         data: {
-          storeSettings: storedSettings,
+          storeSettings: settingsWithoutPin,
           qrisImage: storedQris,
           menuItems: storedMenu,
           orders: storedOrders
@@ -238,7 +274,153 @@ export default function SettingsPage() {
     } catch (err) {
       setShowRestoreConfirmModal(false);
       setPendingBackup(null);
-      setBackupErrorMsg('Gagal memulihkan data (penyimpanan lokal penuh atau rusak): ' + err.message);
+      setBackupErrorMsg('Gagal memulihkan data (memori perangkat penuh atau file rusak): ' + err.message);
+    }
+  };
+
+  // Simpan sebagian pengaturan toko tanpa menimpa field lain
+  const updateSettings = (partial) => {
+    setStoreSettings(prev => ({ ...prev, ...partial }));
+  };
+
+  /* ───────────── Pengaturan Nota & Printer ───────────── */
+  const bluetoothSupported = isBluetoothSupported();
+  const [printerStatus, setPrinterStatus] = useState(() => getPrinterStatus());
+  const [printerBusy, setPrinterBusy] = useState(false);
+  const [printerMsg, setPrinterMsg] = useState('');
+
+  useEffect(() => subscribePrinterStatus(setPrinterStatus), []);
+
+  const printerMode = storeSettings?.printerMode || 'none';
+  const autoPrintEnabled = Boolean(storeSettings?.autoPrint) && printerMode !== 'none';
+
+  const printerModeOptions = [
+    { id: 'none', label: 'Tanpa Printer (Digital)', desc: 'Struk hanya tampil di layar.' },
+    { id: 'browser', label: 'Cetak Browser (58mm / A4)', desc: 'Cetak lewat dialog printer browser.' },
+    { id: 'bluetooth', label: 'Printer Bluetooth (58mm)', desc: 'Cetak langsung ke printer thermal.' }
+  ];
+
+  const handleConnectPrinter = async () => {
+    setPrinterMsg('');
+    setPrinterBusy(true);
+    try {
+      const name = await connectPrinter();
+      updateSettings({ lastPrinterName: name });
+      setPrinterMsg(`Printer "${name}" berhasil terhubung.`);
+    } catch (err) {
+      if (err?.name === 'NotFoundError') {
+        setPrinterMsg('Pemilihan printer dibatalkan.');
+      } else {
+        setPrinterMsg(err?.message || 'Gagal menghubungkan printer. Pastikan printer menyala dan Bluetooth aktif.');
+      }
+    } finally {
+      setPrinterBusy(false);
+    }
+  };
+
+  const handleDisconnectPrinter = () => {
+    disconnectPrinter();
+    setPrinterMsg('Printer diputuskan.');
+  };
+
+  const handleTestPrint = async () => {
+    setPrinterMsg('');
+    setPrinterBusy(true);
+    try {
+      await printTestReceipt(storeSettings);
+      setPrinterMsg('Tes cetak terkirim ke printer.');
+    } catch (err) {
+      setPrinterMsg(err?.message || 'Tes cetak gagal. Coba hubungkan ulang printer.');
+    } finally {
+      setPrinterBusy(false);
+    }
+  };
+
+  /* ───────────── Cadangan Otomatis (Google Drive) ───────────── */
+  const { isOnline, syncState } = useNetworkStatus();
+  const [cloudOpen, setCloudOpen] = useState(false);
+  const [cloudForm, setCloudForm] = useState({
+    url: storeSettings?.cloudBackupUrl || '',
+    pin: storeSettings?.cloudBackupPin || ''
+  });
+  const [cloudBusy, setCloudBusy] = useState('');
+  const [cloudMsg, setCloudMsg] = useState({ type: '', text: '' });
+  const [lastSyncedAt, setLastSyncedAt] = useState(() => getLastSyncedAt());
+
+  useEffect(() => {
+    setLastSyncedAt(getLastSyncedAt());
+  }, [syncState]);
+
+  const saveCloudForm = () => {
+    const url = cloudForm.url.trim();
+    const pin = cloudForm.pin.trim();
+    updateSettings({ cloudBackupUrl: url, cloudBackupPin: pin });
+    return { url, pin };
+  };
+
+  const handleSaveCloudSettings = () => {
+    saveCloudForm();
+    setCloudMsg({ type: 'ok', text: 'Pengaturan cadangan cloud disimpan.' });
+  };
+
+  const handleCloudPush = async () => {
+    setCloudMsg({ type: '', text: '' });
+    const { url, pin } = saveCloudForm();
+
+    if (!url) {
+      setCloudMsg({ type: 'error', text: 'Isi Link Cadangan Cloud terlebih dahulu.' });
+      return;
+    }
+    if (!isOnline) {
+      setCloudMsg({ type: 'error', text: 'Perangkat sedang offline. Coba lagi saat tersambung internet.' });
+      return;
+    }
+
+    setCloudBusy('push');
+    const result = await runCloudBackup({
+      storeSettings: { ...storeSettings, cloudBackupUrl: url, cloudBackupPin: pin },
+      qrisImage,
+      menuItems,
+      orders
+    });
+    setCloudBusy('');
+    setLastSyncedAt(getLastSyncedAt());
+
+    if (result.ok) {
+      setCloudMsg({ type: 'ok', text: 'Data berhasil dicadangkan ke cloud.' });
+    } else if (result.skipped) {
+      setCloudMsg({ type: 'error', text: 'Pencadangan sedang berjalan. Coba lagi sebentar.' });
+    } else {
+      setCloudMsg({ type: 'error', text: result.error || 'Pencadangan gagal. Periksa link dan kode keamanan.' });
+    }
+  };
+
+  const handleCloudPull = async () => {
+    setCloudMsg({ type: '', text: '' });
+    const { url, pin } = saveCloudForm();
+
+    if (!url) {
+      setCloudMsg({ type: 'error', text: 'Isi Link Cadangan Cloud terlebih dahulu.' });
+      return;
+    }
+    if (!isOnline) {
+      setCloudMsg({ type: 'error', text: 'Perangkat sedang offline. Coba lagi saat tersambung internet.' });
+      return;
+    }
+
+    setCloudBusy('pull');
+    try {
+      const payload = await pullCloudBackup(url, pin);
+      if (!isValidKokiKasirBackup(payload)) {
+        setCloudMsg({ type: 'error', text: 'Data di cloud bukan cadangan KokiKasir yang valid.' });
+        return;
+      }
+      setPendingBackup({ fileName: 'Cadangan Cloud (Google Drive)', payload });
+      setShowRestoreConfirmModal(true);
+    } catch (err) {
+      setCloudMsg({ type: 'error', text: err?.message || 'Gagal mengambil data dari cloud.' });
+    } finally {
+      setCloudBusy('');
     }
   };
 
@@ -261,6 +443,18 @@ export default function SettingsPage() {
       }
       if (selectedItems.qris) {
         localStorage.removeItem('kokikasir_qris_image');
+        try {
+          const rawSettings = localStorage.getItem('kokikasir_store_settings');
+          if (rawSettings) {
+            const parsedSettings = JSON.parse(rawSettings);
+            parsedSettings.qrisPayload = '';
+            parsedSettings.qrisMerchantName = '';
+            parsedSettings.qrisMerchantCity = '';
+            localStorage.setItem('kokikasir_store_settings', JSON.stringify(parsedSettings));
+          }
+        } catch {
+          // abaikan
+        }
       }
 
       window.location.reload();
@@ -283,14 +477,14 @@ export default function SettingsPage() {
               Pengaturan Sistem & Personalisasi
             </h3>
             <p className="text-xs text-stone-500 font-medium">
-              Sesuaikan identitas toko Anda pada struk nota dan kelola data penyimpanan lokal.
+              Sesuaikan identitas toko Anda pada struk nota dan kelola data di perangkat ini.
             </p>
           </div>
         </div>
 
         <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-bold self-start sm:self-auto">
           <HardDrive className="w-3.5 h-3.5 text-emerald-600" />
-          <span>Storage: Local & Offline</span>
+          <span>Tersimpan otomatis di perangkat</span>
         </div>
       </div>
 
@@ -476,6 +670,238 @@ export default function SettingsPage() {
         </form>
       </div>
 
+      {/* SEKSI: QRIS PEMBAYARAN (STATIS → DINAMIS OTOMATIS) */}
+      <div className="bg-white rounded-3xl p-5 sm:p-6 border border-emerald-100 shadow-sm shadow-emerald-100/50 space-y-4">
+        <div className="flex items-center gap-2.5 pb-3 border-b border-emerald-100">
+          <CreditCard className="w-5 h-5 text-emerald-600" />
+          <div>
+            <h4 className="font-extrabold text-base text-emerald-950">QRIS Pembayaran</h4>
+            <p className="text-xs text-stone-500">
+              Unggah foto QRIS toko sekali saja agar nominal tagihan terisi otomatis saat pembeli scan.
+            </p>
+          </div>
+        </div>
+
+        {/* Hidden inputs kamera & galeri */}
+        <input
+          type="file"
+          ref={qrisCameraRef}
+          accept="image/*"
+          capture="environment"
+          onChange={handleSettingsQrisUpload}
+          className="hidden"
+        />
+        <input
+          type="file"
+          ref={qrisGalleryRef}
+          accept="image/*"
+          onChange={handleSettingsQrisUpload}
+          className="hidden"
+        />
+
+        {qrisImage ? (
+          <div className="space-y-3">
+            <div className="flex flex-col sm:flex-row items-center gap-4 p-3.5 rounded-2xl bg-stone-50 border border-stone-200">
+              <div className="w-24 h-24 rounded-2xl bg-white border border-emerald-200 p-1.5 flex items-center justify-center flex-shrink-0 overflow-hidden shadow-xs">
+                <img
+                  src={qrisImage}
+                  alt="QRIS Toko"
+                  className="w-full h-full object-contain rounded-lg"
+                />
+              </div>
+              <div className="flex-1 w-full space-y-2.5">
+                <QrisStatusBadge />
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={qrisDecoding}
+                    onClick={() => qrisCameraRef.current?.click()}
+                    className="px-3 py-1.5 rounded-xl bg-white border border-emerald-200 hover:bg-emerald-50 text-emerald-800 font-bold text-xs flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    <Camera className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Foto Ulang</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={qrisDecoding}
+                    onClick={() => qrisGalleryRef.current?.click()}
+                    className="px-3 py-1.5 rounded-xl bg-white border border-stone-200 hover:bg-stone-100 text-stone-700 font-bold text-xs flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    <Upload className="w-3.5 h-3.5 text-stone-600" />
+                    <span>Pilih dari Galeri</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={clearQris}
+                    className="px-3 py-1.5 rounded-xl bg-white border border-rose-200 hover:bg-rose-50 text-rose-600 font-bold text-xs"
+                  >
+                    Hapus
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <button
+              type="button"
+              disabled={qrisDecoding}
+              onClick={() => qrisCameraRef.current?.click()}
+              className="py-3 px-4 rounded-2xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 font-bold text-xs flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
+            >
+              <Camera className="w-4 h-4 text-emerald-600" />
+              <span>{qrisDecoding ? 'Memproses...' : 'Foto QRIS (Kamera)'}</span>
+            </button>
+            <button
+              type="button"
+              disabled={qrisDecoding}
+              onClick={() => qrisGalleryRef.current?.click()}
+              className="py-3 px-4 rounded-2xl bg-stone-50 hover:bg-stone-100 border border-stone-200 text-stone-700 font-bold text-xs flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
+            >
+              <Upload className="w-4 h-4 text-stone-600" />
+              <span>{qrisDecoding ? 'Memproses...' : 'Pilih QRIS dari Galeri'}</span>
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* SEKSI: PENGATURAN NOTA & PRINTER */}
+      <div className="bg-white rounded-3xl p-5 sm:p-6 border border-emerald-100 shadow-sm shadow-emerald-100/50 space-y-4">
+        <div className="flex items-center gap-2.5 pb-3 border-b border-emerald-100">
+          <Printer className="w-5 h-5 text-emerald-600" />
+          <div>
+            <h4 className="font-extrabold text-base text-emerald-950">Pengaturan Nota &amp; Printer</h4>
+            <p className="text-xs text-stone-500">Pilih cara struk dicetak setelah pembayaran.</p>
+          </div>
+        </div>
+
+        {/* Mode Printer */}
+        <div className="space-y-2">
+          {printerModeOptions.map((opt) => {
+            const active = printerMode === opt.id;
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => updateSettings({ printerMode: opt.id })}
+                className={`w-full text-left p-3.5 rounded-2xl border flex items-center justify-between gap-3 transition-all ${
+                  active
+                    ? 'bg-emerald-50 border-emerald-400 shadow-xs'
+                    : 'bg-stone-50/60 hover:bg-stone-100/60 border-stone-200'
+                }`}
+              >
+                <div>
+                  <div className="text-xs font-bold text-emerald-950">{opt.label}</div>
+                  <div className="text-[11px] text-stone-500 mt-0.5">{opt.desc}</div>
+                </div>
+                <span
+                  className={`w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 ${
+                    active ? 'border-emerald-500' : 'border-stone-300'
+                  }`}
+                >
+                  {active && <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Panel Bluetooth */}
+        {printerMode === 'bluetooth' && (
+          <div className="p-4 rounded-2xl bg-stone-50 border border-stone-200 space-y-3">
+            {!bluetoothSupported ? (
+              <p className="text-xs text-stone-600 leading-relaxed">
+                Browser ini belum mendukung printer Bluetooth langsung. Gunakan Chrome di Android/Laptop, atau pilih Cetak Browser.
+              </p>
+            ) : (
+              <>
+                <div className="flex items-center gap-2 text-xs font-bold">
+                  <Bluetooth className={`w-4 h-4 ${printerStatus.connected ? 'text-emerald-600' : 'text-stone-400'}`} />
+                  <span
+                    className={`px-2.5 py-1 rounded-full ${
+                      printerStatus.connected
+                        ? 'bg-emerald-100 text-emerald-800'
+                        : 'bg-stone-200 text-stone-600'
+                    }`}
+                  >
+                    {printerStatus.connected ? `Terhubung: ${printerStatus.name}` : 'Belum terhubung'}
+                  </span>
+                </div>
+
+                {!printerStatus.connected && storeSettings?.lastPrinterName && (
+                  <p className="text-[11px] text-stone-500">
+                    Printer terakhir: {storeSettings.lastPrinterName}
+                  </p>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={handleConnectPrinter}
+                    disabled={printerBusy}
+                    className="py-2.5 px-3 rounded-2xl bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white font-extrabold text-xs shadow-md shadow-emerald-500/20 active:scale-95 transition-all"
+                  >
+                    {printerBusy ? 'Memproses...' : 'Cari & Hubungkan Printer'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDisconnectPrinter}
+                    disabled={!printerStatus.connected || printerBusy}
+                    className="py-2.5 px-3 rounded-2xl bg-stone-100 hover:bg-stone-200 disabled:opacity-40 text-stone-800 font-bold text-xs transition-colors"
+                  >
+                    Putuskan
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleTestPrint}
+                    disabled={!printerStatus.connected || printerBusy}
+                    className="py-2.5 px-3 rounded-2xl bg-stone-100 hover:bg-stone-200 disabled:opacity-40 text-stone-800 font-bold text-xs transition-colors"
+                  >
+                    Tes Cetak
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {printerMsg && (
+          <p className="text-xs font-semibold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2">
+            {printerMsg}
+          </p>
+        )}
+
+        {/* Toggle Cetak Otomatis */}
+        <div
+          className={`flex items-center justify-between gap-3 p-3.5 rounded-2xl border ${
+            printerMode === 'none' ? 'bg-stone-50 border-stone-200 opacity-60' : 'bg-white border-emerald-100'
+          }`}
+        >
+          <div>
+            <div className="text-xs font-bold text-emerald-950">Cetak Otomatis setelah Bayar</div>
+            <div className="text-[11px] text-stone-500 mt-0.5">
+              {printerMode === 'none' ? 'Pilih mode printer terlebih dahulu.' : 'Nota langsung dicetak saat pembayaran selesai.'}
+            </div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={autoPrintEnabled}
+            disabled={printerMode === 'none'}
+            onClick={() => updateSettings({ autoPrint: !storeSettings?.autoPrint })}
+            className={`relative w-11 h-6 rounded-full transition-colors flex-shrink-0 disabled:cursor-not-allowed ${
+              autoPrintEnabled ? 'bg-emerald-500' : 'bg-stone-300'
+            }`}
+          >
+            <span
+              className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${
+                autoPrintEnabled ? 'translate-x-5' : 'translate-x-0'
+              }`}
+            ></span>
+          </button>
+        </div>
+      </div>
+
       {/* SEKSI 2: BACKUP & RESTORE DATA OFFLINE (.JSON) */}
       <div className="bg-white rounded-3xl p-5 sm:p-6 border border-emerald-100 shadow-sm shadow-emerald-100/50 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-emerald-100">
@@ -547,63 +973,97 @@ export default function SettingsPage() {
             <span>Restore Data (Import)</span>
           </button>
         </div>
-      </div>
 
-      {/* SEKSI: LOG ERROR & DIAGNOSTIK */}
-      <div className="bg-white rounded-3xl p-5 sm:p-6 border border-stone-100 shadow-sm space-y-4">
-        <div className="flex items-center gap-2 text-stone-700 font-extrabold text-sm">
-          <Bug className="w-4 h-4 text-amber-500" />
-          <span>Log Error &amp; Diagnostik</span>
-        </div>
+        {/* Cadangan Otomatis (Google Drive) */}
+        <div className="rounded-2xl border border-emerald-100 overflow-hidden">
+          <button
+            type="button"
+            onClick={() => setCloudOpen(prev => !prev)}
+            className="w-full flex items-center justify-between gap-3 px-4 py-3 bg-emerald-50/60 hover:bg-emerald-50 text-left transition-colors"
+          >
+            <span className="flex items-center gap-2 text-sm font-extrabold text-emerald-950">
+              <Cloud className="w-4 h-4 text-emerald-600" />
+              Cadangan Otomatis (Google Drive)
+            </span>
+            <ChevronDown className={`w-4 h-4 text-emerald-700 transition-transform ${cloudOpen ? 'rotate-180' : ''}`} />
+          </button>
 
-        <div className="grid grid-cols-3 gap-3 text-center">
-          <div className="p-3 rounded-2xl bg-stone-50 border border-stone-200">
-            <div className="text-xl font-black text-stone-800">{errorLogStats.total}</div>
-            <div className="text-[11px] text-stone-500 font-medium">Total Log</div>
-          </div>
-          <div className="p-3 rounded-2xl bg-amber-50 border border-amber-100">
-            <div className="text-xl font-black text-amber-700">{errorLogStats.unreported}</div>
-            <div className="text-[11px] text-amber-600 font-medium">Belum Terkirim</div>
-          </div>
-          <div className="p-3 rounded-2xl bg-stone-50 border border-stone-200">
-            <div className="text-[11px] text-stone-800 font-bold leading-tight break-all">
-              {errorLogStats.lastTimestamp
-                ? new Date(errorLogStats.lastTimestamp).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })
-                : '—'}
+          {cloudOpen && (
+            <div className="p-4 space-y-3 bg-white">
+              <div>
+                <label className="block text-xs font-bold text-emerald-900 mb-1">Link Cadangan Cloud</label>
+                <input
+                  type="url"
+                  value={cloudForm.url}
+                  onChange={(e) => setCloudForm(prev => ({ ...prev, url: e.target.value }))}
+                  placeholder="https://script.google.com/macros/s/.../exec"
+                  className="w-full px-4 py-2.5 rounded-xl bg-emerald-50/50 border border-emerald-200 text-xs font-semibold text-emerald-950 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-emerald-900 mb-1">Kode Keamanan (PIN)</label>
+                <input
+                  type="password"
+                  value={cloudForm.pin}
+                  onChange={(e) => setCloudForm(prev => ({ ...prev, pin: e.target.value }))}
+                  placeholder="Opsional"
+                  autoComplete="off"
+                  className="w-full px-4 py-2.5 rounded-xl bg-emerald-50/50 border border-emerald-200 text-xs font-semibold text-emerald-950 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                />
+              </div>
+
+              <div className="text-[11px] text-stone-500 space-y-0.5">
+                <p>
+                  Terakhir dicadangkan:{' '}
+                  <span className="font-bold text-emerald-900">
+                    {lastSyncedAt ? formatWIBDateTime(lastSyncedAt) : 'Belum pernah'}
+                  </span>
+                </p>
+                <p>Tersimpan otomatis di perangkat. Cadangan cloud berjalan otomatis saat tersambung internet.</p>
+              </div>
+
+              {cloudMsg.text && (
+                <p
+                  className={`text-xs font-semibold rounded-xl px-3 py-2 border ${
+                    cloudMsg.type === 'error'
+                      ? 'text-rose-800 bg-rose-50 border-rose-200'
+                      : 'text-emerald-800 bg-emerald-50 border-emerald-200'
+                  }`}
+                >
+                  {cloudMsg.text}
+                </p>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  onClick={handleSaveCloudSettings}
+                  disabled={Boolean(cloudBusy)}
+                  className="py-2.5 px-3 rounded-2xl bg-stone-100 hover:bg-stone-200 disabled:opacity-50 text-stone-800 font-bold text-xs transition-colors"
+                >
+                  Simpan Pengaturan
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCloudPush}
+                  disabled={Boolean(cloudBusy)}
+                  className="py-2.5 px-3 rounded-2xl bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white font-extrabold text-xs shadow-md shadow-emerald-500/20 active:scale-95 transition-all"
+                >
+                  {cloudBusy === 'push' ? 'Mencadangkan...' : 'Cadangkan Sekarang'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCloudPull}
+                  disabled={Boolean(cloudBusy)}
+                  className="py-2.5 px-3 rounded-2xl bg-amber-50 hover:bg-amber-100 disabled:opacity-50 text-amber-900 border border-amber-200 font-extrabold text-xs transition-colors"
+                >
+                  {cloudBusy === 'pull' ? 'Mengambil...' : 'Ambil Data dari Cloud'}
+                </button>
+              </div>
             </div>
-            <div className="text-[11px] text-stone-500 font-medium">Error Terakhir</div>
-          </div>
+          )}
         </div>
-
-        <div className="flex gap-2.5">
-          <button
-            type="button"
-            onClick={() => downloadErrorLogsJson()}
-            className="flex-1 py-2.5 rounded-2xl bg-stone-100 hover:bg-stone-200 text-stone-700 font-bold text-xs flex items-center justify-center gap-1.5 transition-colors"
-          >
-            <Download className="w-4 h-4" />
-            Unduh Log (.json)
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              if (window.confirm('Hapus semua log error lokal? Tindakan ini tidak dapat dibatalkan.')) {
-                clearErrorLogs();
-                setErrorLogStats({ total: 0, unreported: 0, lastTimestamp: null });
-              }
-            }}
-            className="flex-1 py-2.5 rounded-2xl bg-rose-50 hover:bg-rose-100 text-rose-600 font-bold text-xs flex items-center justify-center gap-1.5 transition-colors border border-rose-100"
-          >
-            <Trash2 className="w-4 h-4" />
-            Bersihkan Log
-          </button>
-        </div>
-
-        {errorLogStats.total === 0 && (
-          <p className="text-center text-xs text-stone-400 font-medium py-1">
-            Tidak ada error tercatat. Sistem berjalan normal. ✓
-          </p>
-        )}
       </div>
 
       {/* SEKSI 3: PENYEDERHANAAN UI RESET DATA APLIKASI (SATU TOMBOL UTAMA) */}
@@ -629,14 +1089,14 @@ export default function SettingsPage() {
         </button>
       </div>
 
-      {/* Informasi Sistem & Status PWA */}
+      {/* Informasi Sistem & Status Aplikasi */}
       <div className="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm shadow-emerald-100/40 text-xs text-stone-600 space-y-2">
         <h4 className="font-bold text-emerald-950 flex items-center gap-2">
           <Info className="w-4 h-4 text-emerald-600" />
-          <span>Informasi KokiKasir PWA</span>
+          <span>Informasi KokiKasir</span>
         </h4>
         <p className="text-stone-500 leading-relaxed">
-          Versi 1.2 Enterprise • PWA POS Offline-First. Seluruh data transaksi, menu, dan preferensi toko disimpan langsung di peramban lokal perangkat tanpa memerlukan sambungan internet.
+          Versi 1.3 • Seluruh data transaksi, menu, dan pengaturan toko tersimpan otomatis di perangkat tanpa memerlukan sambungan internet.
         </p>
       </div>
 
@@ -746,7 +1206,7 @@ export default function SettingsPage() {
                         Gambar QRIS Toko
                       </div>
                       <div className="text-[11px] text-stone-500 mt-0.5">
-                        Menghapus barcode QRIS statis tersimpan
+                        Menghapus gambar &amp; data QRIS tersimpan
                       </div>
                     </div>
                     <div className={`w-5 h-5 rounded-md flex items-center justify-center border ${

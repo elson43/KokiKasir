@@ -243,7 +243,7 @@ export default function MenuManagementPage() {
 
     try {
       setIsProcessingImage(true);
-      const base64 = await compressImageToBase64(file, 500, 0.75);
+      const base64 = await compressImageToBase64(file, 'menu');
       setFormData(prev => ({ ...prev, image: base64 }));
     } catch (err) {
       alert('Gagal memproses foto menu: ' + err.message);

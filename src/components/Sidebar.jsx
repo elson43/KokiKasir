@@ -48,7 +48,7 @@ export default function Sidebar() {
     {
       id: 'settings',
       label: 'Pengaturan',
-      sublabel: 'Reset & Data Lokal',
+      sublabel: 'Backup & Data di Perangkat',
       icon: Settings,
       badge: null
     }
@@ -133,17 +133,16 @@ export default function Sidebar() {
         </div>
 
         {/* Offline & System Status */}
-        <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-stone-50 border border-stone-200/60 text-xs text-stone-600">
-          <div className="flex items-center gap-2">
-            <span className="relative flex h-2 w-2">
+        <div className="px-3 py-2.5 rounded-xl bg-stone-50 border border-stone-200/60 text-xs text-stone-600">
+          <div className="flex items-start gap-2">
+            <span className="relative flex h-2 w-2 mt-1 flex-shrink-0">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
               <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
             </span>
-            <span className="font-semibold text-emerald-950">Mode Offline Aktif</span>
+            <span className="font-semibold text-emerald-950 leading-snug">
+              Mode Offline — data tersimpan otomatis di perangkat
+            </span>
           </div>
-          <span className="text-[10px] bg-emerald-100/80 text-emerald-800 font-semibold px-2 py-0.5 rounded-full">
-            LocalStorage
-          </span>
         </div>
       </div>
     </aside>

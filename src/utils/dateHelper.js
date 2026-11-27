@@ -227,3 +227,30 @@ export const groupOrdersByDate = (ordersList) => {
     orders: groups[date]
   }));
 };
+
+
+/**
+ * Format tanggal & jam WIB untuk tampilan, contoh: "28 Nov 2026, 01:30 WIB".
+ *
+ * @param {Date|string|number} d
+ * @returns {string} string kosong jika tanggal tidak valid
+ */
+export const formatWIBDateTime = (d) => {
+  const date = new Date(d);
+  if (!d || isNaN(date.getTime())) return '';
+
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: WIB_TIMEZONE,
+    day: 'numeric',
+    month: 'numeric',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(date);
+
+  const pick = (type) => parts.find((p) => p.type === type)?.value || '';
+  const month = SHORT_MONTHS_ID[Number(pick('month')) - 1] || pick('month');
+
+  return `${pick('day')} ${month} ${pick('year')}, ${pick('hour')}:${pick('minute')} WIB`;
+};

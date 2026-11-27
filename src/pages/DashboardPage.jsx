@@ -1,7 +1,10 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import Logo from '../components/Logo';
-import { compressImageToBase64 } from '../utils/imageHelper';
+import QrisStatusBadge from '../components/QrisStatusBadge';
+import { isPrinterConnected, printReceipt } from '../utils/bluetoothPrinter';
+import { generateDynamicQrisPayload, renderQrisToDataUrl } from '../utils/qrisHelper';
+import { logError } from '../utils/errorLogger';
 import {
   getLocalDate,
   getWIBTimeString,
@@ -33,7 +36,17 @@ import {
 } from 'lucide-react';
 
 export default function DashboardPage() {
-  const { orders, setOrders, setDraftOrder, setActiveNav, qrisImage, setQrisImage, storeSettings } = useApp();
+  const {
+    orders,
+    setOrders,
+    setDraftOrder,
+    setActiveNav,
+    qrisImage,
+    saveQrisFromFile,
+    clearQris,
+    qrisDecoding,
+    storeSettings
+  } = useApp();
   const [activeTab, setActiveTab] = useState('unpaid'); // 'unpaid' | 'history'
 
   // Modal states
@@ -44,6 +57,7 @@ export default function DashboardPage() {
   const [cashGiven, setCashGiven] = useState('');
   const [showReceiptModal, setShowReceiptModal] = useState(false);
   const [completedOrder, setCompletedOrder] = useState(null);
+  const [printNotice, setPrintNotice] = useState('');
 
   // Accordion state untuk Tab Riwayat Lunas (PAID)
   // Default: Hari ini otomatis terbuka, tanggal sebelumnya tertutup
@@ -59,9 +73,55 @@ export default function DashboardPage() {
     }));
   };
 
-  // QRIS upload ref
+  // QRIS upload ref & Dynamic QRIS state
   const qrisFileInputRef = useRef(null);
-  const [qrisUploadLoading, setQrisUploadLoading] = useState(false);
+  const [dynamicQrisUrl, setDynamicQrisUrl] = useState('');
+  const [showOriginalQris, setShowOriginalQris] = useState(false);
+  const [payTimeWib, setPayTimeWib] = useState('');
+
+  // Generate QRIS dinamis setiap kali modal bayar QRIS terbuka untuk pesanan aktif
+  useEffect(() => {
+    if (!showPayModal || paymentMethod !== 'QRIS') {
+      return;
+    }
+
+    setPayTimeWib(getWIBTimeString());
+    const timer = setInterval(() => setPayTimeWib(getWIBTimeString()), 15000);
+
+    const staticPayload = storeSettings?.qrisPayload;
+    const total = selectedOrder?.total || 0;
+
+    if (!staticPayload || total <= 0) {
+      setDynamicQrisUrl('');
+      return () => clearInterval(timer);
+    }
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const dynamicPayload = generateDynamicQrisPayload(staticPayload, total);
+        const dataUrl = await renderQrisToDataUrl(dynamicPayload);
+        if (!cancelled) setDynamicQrisUrl(dataUrl);
+      } catch (err) {
+        logError({
+          message: `Gagal membuat QRIS dinamis: ${err?.message || err}`,
+          stack: err?.stack,
+          route: 'dashboard-qris'
+        });
+        if (!cancelled) setDynamicQrisUrl('');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [showPayModal, paymentMethod, storeSettings?.qrisPayload, selectedOrder?.total]);
+
+  // Reset toggle gambar asli saat ganti pesanan / buka modal bayar
+  useEffect(() => {
+    if (showPayModal) setShowOriginalQris(false);
+  }, [showPayModal, selectedOrder?.id]);
 
   // 1. Filter UNPAID Orders (semua tagihan terbuka, urutkan jam lama ke baru per tanggal)
   const unpaidOrders = orders
@@ -110,6 +170,41 @@ export default function DashboardPage() {
     setSelectedOrder(null);
   };
 
+  // Cetak lewat browser dengan CSS struk 58mm (aktif hanya selama proses cetak)
+  const printViaBrowser = () => {
+    document.body.classList.add('receipt-printing');
+    const cleanup = () => {
+      document.body.classList.remove('receipt-printing');
+      window.removeEventListener('afterprint', cleanup);
+    };
+    window.addEventListener('afterprint', cleanup);
+    window.print();
+  };
+
+  // Handler terpadu cetak nota berdasarkan mode printer di Pengaturan
+  const handlePrintReceipt = async (order) => {
+    if (!order) return;
+    setPrintNotice('');
+
+    if (storeSettings?.printerMode === 'bluetooth') {
+      if (!isPrinterConnected()) {
+        setPrintNotice('Printer Bluetooth belum terhubung. Mencetak lewat browser. Hubungkan printer di menu Pengaturan.');
+        printViaBrowser();
+        return;
+      }
+      try {
+        await printReceipt(order, storeSettings);
+      } catch {
+        setPrintNotice('Printer Bluetooth tidak merespons. Mencetak lewat browser.');
+        printViaBrowser();
+      }
+      return;
+    }
+
+    // Mode 'browser' dan 'none' (cetak manual) memakai cetak browser
+    printViaBrowser();
+  };
+
   // Handler: Confirm Payment
   const handleConfirmPayment = () => {
     if (!selectedOrder) return;
@@ -131,23 +226,23 @@ export default function DashboardPage() {
     setCompletedOrder(paidRecord);
     setShowPayModal(false);
     setSelectedOrder(null);
+    setPrintNotice('');
     setShowReceiptModal(true);
+
+    // Cetak otomatis sekali setelah bayar (tidak pernah aktif pada mode "Tanpa Printer")
+    if (storeSettings?.autoPrint && storeSettings?.printerMode && storeSettings.printerMode !== 'none') {
+      setTimeout(() => handlePrintReceipt(paidRecord), 400);
+    }
   };
 
-  // Handler: Upload QRIS Image (Base64 saved to LocalStorage via AppContext)
+  // Handler: Upload QRIS Image (kompres + baca otomatis menjadi QRIS dinamis)
   const handleQRISFileChange = async (e) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
 
-    try {
-      setQrisUploadLoading(true);
-      const base64 = await compressImageToBase64(file, 600, 0.85);
-      setQrisImage(base64);
-    } catch (err) {
-      alert('Gagal memproses gambar QRIS: ' + err.message);
-    } finally {
-      setQrisUploadLoading(false);
-    }
+    setShowOriginalQris(false);
+    await saveQrisFromFile(file);
   };
 
   // Order type badge visual helper
@@ -556,10 +651,10 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* PROSES BAYAR (QRIS dengan Base64 upload & TUNAI Cepat) */}
+      {/* PROSES BAYAR (QRIS Dinamis/Statis & TUNAI Cepat) */}
       {showPayModal && selectedOrder && (
         <div className="fixed inset-0 z-50 bg-stone-900/40 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-emerald-100 animate-fade-in space-y-5">
+          <div className="bg-white rounded-3xl max-w-md w-full max-h-[92vh] overflow-y-auto p-6 shadow-2xl border border-emerald-100 animate-fade-in space-y-5">
             {/* Header */}
             <div className="flex items-center justify-between pb-3 border-b border-emerald-100">
               <div>
@@ -614,40 +709,112 @@ export default function DashboardPage() {
               </div>
             </div>
 
-            {/* QRIS View dengan Base64 upload & persistence di LocalStorage */}
+            {/* QRIS View (Dinamis otomatis jika terbaca, fallback ke gambar QRIS statis) */}
             {paymentMethod === 'QRIS' && (
               <div className="p-4 rounded-2xl bg-stone-50 border border-stone-200 text-center space-y-3 animate-fade-in">
-                {/* Hidden File Input dengan HTML5 Camera Capture */}
+                {/* Hidden File Input */}
                 <input
                   type="file"
                   ref={qrisFileInputRef}
                   accept="image/*"
-                  capture="environment"
                   onChange={handleQRISFileChange}
                   className="hidden"
                 />
 
-                {qrisImage ? (
-                  <div className="space-y-2">
-                    <div className="max-w-[200px] max-h-[200px] mx-auto bg-white p-2 rounded-2xl shadow-sm border border-emerald-200 overflow-hidden flex items-center justify-center">
+                {storeSettings?.qrisPayload && selectedOrder.total > 0 && dynamicQrisUrl && !showOriginalQris ? (
+                  <div className="space-y-2.5">
+                    <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 text-[11px] font-extrabold">
+                      <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>QRIS Dinamis</span>
+                    </div>
+
+                    <div className="bg-white p-4 rounded-2xl border border-emerald-100 shadow-xs inline-block mx-auto">
+                      <img
+                        src={dynamicQrisUrl}
+                        alt="QRIS Dinamis"
+                        className="w-52 h-52 sm:w-56 sm:h-56 object-contain mx-auto"
+                      />
+                    </div>
+
+                    <div className="space-y-0.5">
+                      {storeSettings.qrisMerchantName && (
+                        <div className="text-xs font-extrabold text-emerald-950 uppercase tracking-tight">
+                          {storeSettings.qrisMerchantName}
+                          {storeSettings.qrisMerchantCity ? ` • ${storeSettings.qrisMerchantCity}` : ''}
+                        </div>
+                      )}
+                      <div className="text-xl font-black text-emerald-700">
+                        Rp {selectedOrder.total.toLocaleString('id-ID')}
+                      </div>
+                      <p className="text-[11px] text-emerald-700/80 font-medium">
+                        Nominal terisi otomatis saat pembeli scan.
+                      </p>
+                    </div>
+
+                    {qrisImage && (
+                      <button
+                        type="button"
+                        onClick={() => setShowOriginalQris(true)}
+                        className="text-[11px] font-bold text-stone-500 hover:text-emerald-700 underline underline-offset-2"
+                      >
+                        Tampilkan gambar QRIS asli
+                      </button>
+                    )}
+
+                    <div className="flex justify-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        disabled={qrisDecoding}
+                        onClick={() => qrisFileInputRef.current?.click()}
+                        className="text-xs px-3 py-1.5 rounded-xl bg-white border border-stone-200 hover:bg-stone-100 text-stone-700 font-bold flex items-center gap-1.5 shadow-xs disabled:opacity-50"
+                      >
+                        <Camera className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>{qrisDecoding ? 'Memproses...' : 'Ganti QRIS'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={clearQris}
+                        className="text-xs px-3 py-1.5 rounded-xl bg-white border border-rose-200 hover:bg-rose-50 text-rose-600 font-bold shadow-xs"
+                      >
+                        Hapus
+                      </button>
+                    </div>
+                  </div>
+                ) : qrisImage ? (
+                  <div className="space-y-2.5">
+                    <div className="max-w-[220px] max-h-[220px] mx-auto bg-white p-2.5 rounded-2xl shadow-sm border border-emerald-200 overflow-hidden flex items-center justify-center">
                       <img
                         src={qrisImage}
                         alt="QRIS Toko"
                         className="w-full h-full object-contain rounded-xl"
                       />
                     </div>
+
+                    {storeSettings?.qrisPayload ? (
+                      <button
+                        type="button"
+                        onClick={() => setShowOriginalQris(false)}
+                        className="text-[11px] font-bold text-emerald-700 hover:text-emerald-800 underline underline-offset-2"
+                      >
+                        Kembali ke QRIS Dinamis
+                      </button>
+                    ) : (
+                      <QrisStatusBadge />
+                    )}
+
                     <div className="flex justify-center gap-2">
                       <button
                         type="button"
+                        disabled={qrisDecoding}
                         onClick={() => qrisFileInputRef.current?.click()}
-                        className="text-xs px-3 py-1.5 rounded-xl bg-white border border-stone-200 hover:bg-stone-100 text-stone-700 font-bold flex items-center gap-1.5 shadow-xs"
+                        className="text-xs px-3 py-1.5 rounded-xl bg-white border border-stone-200 hover:bg-stone-100 text-stone-700 font-bold flex items-center gap-1.5 shadow-xs disabled:opacity-50"
                       >
                         <Camera className="w-3.5 h-3.5 text-emerald-600" />
-                        <span>Ganti QRIS</span>
+                        <span>{qrisDecoding ? 'Memproses...' : 'Ganti QRIS'}</span>
                       </button>
                       <button
                         type="button"
-                        onClick={() => setQrisImage('')}
+                        onClick={clearQris}
                         className="text-xs px-3 py-1.5 rounded-xl bg-white border border-rose-200 hover:bg-rose-50 text-rose-600 font-bold shadow-xs"
                       >
                         Hapus
@@ -660,25 +827,25 @@ export default function DashboardPage() {
                       <CreditCard className="w-8 h-8" />
                     </div>
                     <div className="font-extrabold text-sm text-stone-800">
-                      Belum Ada Gambar QRIS Statis
+                      Belum Ada Gambar QRIS Toko
                     </div>
                     <p className="text-xs text-stone-500 max-w-xs mx-auto">
-                      Foto langsung barcode QRIS toko Anda atau pilih dari galeri untuk disimpan permanen.
+                      Foto atau unggah QRIS toko Anda agar nominal pesanan bisa terisi otomatis saat pembeli scan.
                     </p>
                     <button
                       type="button"
-                      disabled={qrisUploadLoading}
+                      disabled={qrisDecoding}
                       onClick={() => qrisFileInputRef.current?.click()}
-                      className="px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white font-extrabold text-xs inline-flex items-center gap-2 shadow-sm shadow-emerald-500/20"
+                      className="px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white font-extrabold text-xs inline-flex items-center gap-2 shadow-sm shadow-emerald-500/20"
                     >
                       <Camera className="w-4 h-4" />
-                      <span>{qrisUploadLoading ? 'Memproses...' : 'Foto / Upload QRIS Toko'}</span>
+                      <span>{qrisDecoding ? 'Memproses...' : 'Foto / Upload QRIS Toko'}</span>
                     </button>
                   </div>
                 )}
 
                 <p className="text-[11px] text-stone-500">
-                  Pelanggan scan barcode QRIS menggunakan GoPay, OVO, Dana, BCA, dll.
+                  Pelanggan scan QRIS menggunakan GoPay, OVO, DANA, ShopeePay, BCA, BRI, Mandiri, dll.
                 </p>
               </div>
             )}
@@ -734,13 +901,25 @@ export default function DashboardPage() {
               </div>
             )}
 
+            {/* Pengingat verifikasi QRIS sebelum Konfirmasi Lunas */}
+            {paymentMethod === 'QRIS' && (qrisImage || storeSettings?.qrisPayload) && (
+              <div className="p-3 rounded-2xl bg-emerald-50/70 border border-emerald-200/80 text-emerald-900 text-[11px] flex items-start gap-2.5">
+                <Clock className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                <div className="leading-relaxed">
+                  <span className="font-extrabold text-emerald-800">{payTimeWib || getWIBTimeString()} WIB</span>
+                  {' — '}
+                  Pastikan layar pembeli menampilkan status <strong>Berhasil</strong> dengan nominal yang sama sebelum konfirmasi.
+                </div>
+              </div>
+            )}
+
             {/* Selesai Bayar Button */}
             <button
               onClick={handleConfirmPayment}
               disabled={paymentMethod === 'TUNAI' && numCashGiven < selectedOrder.total}
               className="w-full py-4 rounded-2xl bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 text-white font-black text-base shadow-lg shadow-emerald-500/25 transition-all"
             >
-              Konfirmasi & Cetak Struk
+              {paymentMethod === 'QRIS' ? 'Konfirmasi Lunas' : 'Konfirmasi & Cetak Struk'}
             </button>
           </div>
         </div>
@@ -751,7 +930,7 @@ export default function DashboardPage() {
         <div className="fixed inset-0 z-50 bg-stone-900/50 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-stone-200 animate-fade-in space-y-4">
             {/* Receipt Paper Styling */}
-            <div className="border border-stone-200 rounded-2xl p-4 bg-stone-50/50 font-mono text-xs text-stone-800 space-y-3">
+            <div id="receipt-print" className="border border-stone-200 rounded-2xl p-4 bg-stone-50/50 font-mono text-xs text-stone-800 space-y-3">
               {/* Logo & Header Dinamis Berdasarkan storeSettings */}
               <div className="text-center pb-2 border-b border-dashed border-stone-300">
                 <div className="flex justify-center mb-1.5">
@@ -832,10 +1011,17 @@ export default function DashboardPage() {
               </div>
             </div>
 
+            {/* Pemberitahuan cetak (tidak ikut tercetak) */}
+            {printNotice && (
+              <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 font-semibold print:hidden">
+                {printNotice}
+              </p>
+            )}
+
             {/* Modal Actions */}
-            <div className="flex gap-2">
+            <div className="flex gap-2 print:hidden">
               <button
-                onClick={() => window.print()}
+                onClick={() => handlePrintReceipt(completedOrder)}
                 className="flex-1 py-3 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-800 font-bold text-xs flex items-center justify-center gap-1.5"
               >
                 <Printer className="w-4 h-4" />
@@ -844,6 +1030,7 @@ export default function DashboardPage() {
               <button
                 onClick={() => {
                   setShowReceiptModal(false);
+                  setPrintNotice('');
                   setDraftOrder({ customerName: '', orderType: 'Makan Sini', items: {}, editingOrderId: null });
                   setActiveNav('home');
                 }}

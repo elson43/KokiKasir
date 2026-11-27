@@ -1,168 +1,166 @@
 /**
- * KokiKasir — Background Sync Service
+ * KokiKasir — Cadangan Cloud Sederhana (Google Drive via Google Apps Script)
  *
- * Pushes "pending" local records to Supabase whenever the device comes online.
- * Currently a scaffold — activate by:
- *   1. Installing @supabase/supabase-js (`pnpm add @supabase/supabase-js`)
- *   2. Populating VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in .env.local
- *   3. Uncomment the Supabase calls below
+ * Tanpa dependensi tambahan: hanya fetch ke Web App Google Apps Script milik pengguna.
+ * Jika `cloudBackupUrl` kosong, semua fungsi tidak melakukan apa-apa (aplikasi tetap offline penuh).
  *
- * The sync service is intentionally a plain module (not a React hook) so it
- * can be called from AppContext, background tasks, or service workers.
+ * Kontrak Apps Script:
+ *  - POST (text/plain;charset=utf-8) body JSON { pin, payload } → { ok: true } / { ok: false, error }
+ *  - GET  ?pin=...                                              → { ok: true, payload } / { ok: false, error }
  */
 
-import { getSupabaseClient, isSupabaseConfigured } from './supabase';
-import { getUnreportedLogs, markLogsAsReported } from '../utils/errorLogger';
+import { logError } from '../utils/errorLogger';
 
-let _syncInProgress = false;
-let _onSyncStateChange = null; // (state: 'idle'|'syncing'|'error') => void
+const LAST_SYNCED_KEY = 'kokikasir_last_synced_at';
 
-/**
- * Register a callback to be notified when sync state changes.
- * This is wired to the useNetworkStatus setSyncState in AppContext.
- */
-export function registerSyncStateCallback(cb) {
-  _onSyncStateChange = cb;
+/* ───────────────────── Status sinkronisasi global ───────────────────── */
+
+let currentState = 'idle'; // 'idle' | 'syncing' | 'error'
+const stateListeners = new Set();
+let syncInProgress = false;
+
+export function getSyncState() {
+  return currentState;
 }
 
-function setSyncState(state) {
-  if (typeof _onSyncStateChange === 'function') {
-    _onSyncStateChange(state);
+export function setSyncState(state) {
+  if (state === currentState) return;
+  currentState = state;
+  stateListeners.forEach((cb) => {
+    try {
+      cb(state);
+    } catch {
+      // abaikan error listener
+    }
+  });
+}
+
+export function subscribeSyncState(cb) {
+  stateListeners.add(cb);
+  return () => stateListeners.delete(cb);
+}
+
+/* ───────────────────────── Waktu terakhir cadangan ───────────────────────── */
+
+export function getLastSyncedAt() {
+  try {
+    return localStorage.getItem(LAST_SYNCED_KEY);
+  } catch {
+    return null;
   }
 }
 
+export function updateLastSyncedAt() {
+  try {
+    localStorage.setItem(LAST_SYNCED_KEY, new Date().toISOString());
+  } catch {
+    // abaikan
+  }
+}
+
+/* ───────────────────────────── Payload cadangan ───────────────────────────── */
+
 /**
- * Syncs all local "pending" data to Supabase.
- * Safe to call multiple times — no-op if already syncing or not configured.
- *
- * @param {object} opts
- * @param {Array}  opts.menuItems       - current menuItems from AppContext
- * @param {Array}  opts.orders          - current orders from AppContext
- * @param {object} opts.storeSettings   - current storeSettings from AppContext
- * @param {string} opts.qrisImage       - current qrisImage (base64)
- * @param {Function} opts.onMenuSynced  - callback to update local syncStatus fields
- * @param {Function} opts.onOrderSynced - callback to update local syncStatus fields
+ * Bentuk payload cadangan KokiKasir. PIN cloud tidak pernah ikut tersimpan di dalamnya.
  */
-export async function syncToSupabase({
-  menuItems = [],
-  orders = [],
-  storeSettings = {},
-  qrisImage = '',
-  onMenuSynced,
-  onOrderSynced,
-} = {}) {
-  if (_syncInProgress) return;
-  if (!isSupabaseConfigured()) return;
-  if (!navigator.onLine) return;
+export function buildBackupPayload({ storeSettings = {}, qrisImage = '', menuItems = [], orders = [] } = {}) {
+  // eslint-disable-next-line no-unused-vars
+  const { cloudBackupPin, ...safeSettings } = storeSettings || {};
+  return {
+    app: 'KokiKasir',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    data: {
+      storeSettings: safeSettings,
+      qrisImage: qrisImage || '',
+      menuItems,
+      orders
+    }
+  };
+}
 
-  const client = getSupabaseClient();
-  if (!client) return;
+/* ───────────────────────────── Klien Apps Script ───────────────────────────── */
 
-  _syncInProgress = true;
+async function readJsonResponse(response) {
+  if (!response.ok) {
+    throw new Error('Server cadangan tidak merespons dengan benar.');
+  }
+  let json;
+  try {
+    json = await response.json();
+  } catch {
+    throw new Error('Tanggapan dari server cadangan tidak dikenali. Periksa link cadangan.');
+  }
+  if (json && json.ok === false) {
+    throw new Error(json.error || 'Cadangan ditolak oleh server. Periksa kode keamanan (PIN).');
+  }
+  return json;
+}
+
+/**
+ * Unggah cadangan ke Google Apps Script Web App.
+ * Memakai text/plain agar tidak memicu CORS preflight.
+ */
+export async function pushCloudBackup(url, pin, payload) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ pin: pin || '', payload }),
+    redirect: 'follow'
+  });
+  return readJsonResponse(response);
+}
+
+/**
+ * Ambil cadangan terakhir dari Google Apps Script Web App.
+ * @returns {Promise<object>} Payload cadangan KokiKasir
+ */
+export async function pullCloudBackup(url, pin) {
+  const separator = url.includes('?') ? '&' : '?';
+  const response = await fetch(`${url}${separator}pin=${encodeURIComponent(pin || '')}`, {
+    method: 'GET',
+    redirect: 'follow'
+  });
+  const json = await readJsonResponse(response);
+  const payload = json && json.payload ? json.payload : json;
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('Belum ada data cadangan di cloud.');
+  }
+  return payload;
+}
+
+/* ───────────────────────────── Cadangan otomatis ───────────────────────────── */
+
+/**
+ * Jalankan cadangan cloud dengan memperbarui status sinkronisasi.
+ * Tidak melakukan apa-apa (tanpa error) bila link kosong atau perangkat offline.
+ *
+ * @returns {Promise<{ok: boolean, skipped?: boolean, error?: string}>}
+ */
+export async function runCloudBackup({ storeSettings = {}, qrisImage = '', menuItems = [], orders = [] } = {}) {
+  const url = (storeSettings?.cloudBackupUrl || '').trim();
+  if (!url) return { ok: false, skipped: true };
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return { ok: false, skipped: true };
+  if (syncInProgress) return { ok: false, skipped: true };
+
+  syncInProgress = true;
   setSyncState('syncing');
 
   try {
-    /* ── Uncomment after installing @supabase/supabase-js ──────────────────
-
-    const { data: { session } } = await client.auth.getSession();
-    if (!session?.user) {
-      setSyncState('idle');
-      return;
-    }
-    const userId = session.user.id;
-
-    // 1. Sync pending menu items
-    const pendingMenus = menuItems.filter(m => m.syncStatus === 'pending');
-    if (pendingMenus.length > 0) {
-      const rows = pendingMenus.map(m => ({
-        id: m.id,
-        user_id: userId,
-        name: m.name,
-        category: m.category,
-        price: m.price,
-        status: m.status,
-        image: m.image,
-        description: m.description,
-        sync_status: 'synced',
-        updated_at: new Date().toISOString()
-      }));
-      const { error } = await client.from('menu_items').upsert(rows, { onConflict: 'id' });
-      if (!error && typeof onMenuSynced === 'function') {
-        onMenuSynced(pendingMenus.map(m => m.id));
-      }
-    }
-
-    // 2. Sync pending orders
-    const pendingOrders = orders.filter(o => o.syncStatus === 'pending');
-    if (pendingOrders.length > 0) {
-      const rows = pendingOrders.map(o => ({
-        id: o.id,
-        user_id: userId,
-        customer_name: o.customerName,
-        order_type: o.orderType,
-        items: o.items,
-        total: o.total,
-        status: o.status,
-        payment_method: o.paymentMethod,
-        cash_given: o.cashGiven,
-        change: o.change,
-        paid_at: o.paidAt,
-        paid_timestamp: o.paidTimestamp,
-        date: o.date,
-        created_at: o.createdAt,
-        sync_status: 'synced',
-        updated_at: new Date().toISOString()
-      }));
-      const { error } = await client.from('orders').upsert(rows, { onConflict: 'id' });
-      if (!error && typeof onOrderSynced === 'function') {
-        onOrderSynced(pendingOrders.map(o => o.id));
-      }
-    }
-
-    // 3. Sync error logs
-    const unreportedLogs = getUnreportedLogs();
-    if (unreportedLogs.length > 0) {
-      const rows = unreportedLogs.map(log => ({
-        id: log.id,
-        user_id: userId,
-        timestamp: log.timestamp,
-        message: log.message,
-        stack: log.stack,
-        component_stack: log.componentStack,
-        route: log.route,
-        app_version: log.appVersion,
-        reported: true
-      }));
-      const { error } = await client.from('error_logs').upsert(rows, { onConflict: 'id' });
-      if (!error) {
-        markLogsAsReported(unreportedLogs.map(l => l.id));
-      }
-    }
-
+    const payload = buildBackupPayload({ storeSettings, qrisImage, menuItems, orders });
+    await pushCloudBackup(url, storeSettings?.cloudBackupPin || '', payload);
+    updateLastSyncedAt();
     setSyncState('idle');
-    ─────────────────────────────────────────────────────────────────────── */
-
-    // Scaffold placeholder — no-op until Supabase is configured
-    setSyncState('idle');
+    return { ok: true };
   } catch (err) {
-    console.error('[KokiKasir] Sync error:', err);
+    logError({
+      message: `Cadangan cloud gagal: ${err?.message || err}`,
+      stack: err?.stack,
+      route: 'cloud-backup'
+    });
     setSyncState('error');
+    return { ok: false, error: err?.message || 'Cadangan gagal.' };
   } finally {
-    _syncInProgress = false;
+    syncInProgress = false;
   }
-}
-
-/**
- * Returns the last-synced timestamp stored locally.
- * @returns {string|null}
- */
-export function getLastSyncedAt() {
-  return localStorage.getItem('kokikasir_last_synced_at');
-}
-
-/**
- * Saves the current time as the last-synced timestamp.
- */
-export function updateLastSyncedAt() {
-  localStorage.setItem('kokikasir_last_synced_at', new Date().toISOString());
 }
